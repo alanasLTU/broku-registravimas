@@ -18,9 +18,9 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         ) : (
           <>
             {guestFlow ? (
-              <p>Prisijunkite su <b>savo el. paštu</b> ir slaptažodžiu (bent 6 simboliai). Jei paskyros dar nėra — ji bus sukurta automatiškai.</p>
+              <p>Pirmas kartas šiame objekte: įveskite <b>savo el. paštą</b> ir slaptažodį (bent 6 simboliai). Jei paskyros dar nėra — ji bus sukurta. Kitą kartą jungkitės tuo pačiu acc be nuorodos.</p>
             ) : (
-              <p>Prisijunkite su <b>alanas@digroup.lt</b> / <b>Distyle</b>. Tas pats prisijungimas tinka keliems telefonams vienu metu.</p>
+              <p>Prisijunkite savo el. paštu ir slaptažodžiu. Klientai mato tik savo objektą. Distyle komanda — visą registrą.</p>
             )}
             {params.error ? <p className="login-error">{params.error}</p> : null}
             <LoginForm invite={params.invite ?? ""} join={params.join ?? ""} />

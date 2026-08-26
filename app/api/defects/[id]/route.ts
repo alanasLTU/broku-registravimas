@@ -1,5 +1,5 @@
 import { apiError, requireUser } from "@/lib/auth";
-import { COMPLETED_STATUS, normalizeStatus, priorities, recordTypes, responsibilities, statuses } from "@/lib/constants";
+import { clientRecordTypes, COMPLETED_STATUS, normalizeStatus, priorities, recordTypes, responsibilities, statuses } from "@/lib/constants";
 import { mapRecord, type RecordRow } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
@@ -33,7 +33,12 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       updates.description = itemPayload?.map((item) => item.issue).join("\n") ?? "";
       updates.required_work = itemPayload?.map((item) => item.requiredWork).filter(Boolean).join("\n") ?? "";
     }
-    if (typeof payload.recordType === "string" && recordTypes.includes(payload.recordType as typeof recordTypes[number])) updates.record_type = payload.recordType;
+    if (typeof payload.recordType === "string" && recordTypes.includes(payload.recordType as typeof recordTypes[number])) {
+      if (profile.role === "client" && !clientRecordTypes.includes(payload.recordType as typeof clientRecordTypes[number])) {
+        return Response.json({ error: "Klientai negali kurti užduočių." }, { status: 403 });
+      }
+      updates.record_type = payload.recordType;
+    }
     if (typeof payload.title === "string" && payload.title.trim()) updates.title = payload.title.trim().slice(0, 300);
     if (typeof payload.room === "string") updates.room = payload.room.trim().slice(0, 120);
     if (typeof payload.zone === "string") updates.zone = payload.zone.trim().slice(0, 120);

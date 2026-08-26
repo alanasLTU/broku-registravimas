@@ -1,4 +1,5 @@
 import { apiError, requireUser } from "@/lib/auth";
+import { resolvePublicOrigin } from "@/lib/public-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +10,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "Nuorodą gali kurti tik Distyle komanda." }, { status: 403 });
     }
 
-    const payload = await request.json() as { projectId?: string };
+    const payload = await request.json() as { projectId?: string; origin?: string };
     const projectId = payload.projectId?.trim() ?? "";
     if (!projectId) return Response.json({ error: "Nenurodytas projektas." }, { status: 400 });
 
@@ -31,8 +32,8 @@ export async function POST(request: Request) {
       if (updateError) throw updateError;
     }
 
-    const origin = process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin;
-    const link = `${origin.replace(/\/$/, "")}/login?join=${shareToken}`;
+    const origin = resolvePublicOrigin(request, payload.origin);
+    const link = `${origin}/login?join=${shareToken}`;
     return Response.json({ link, token: shareToken, projectName: project.name });
   } catch (error) {
     return apiError(error);

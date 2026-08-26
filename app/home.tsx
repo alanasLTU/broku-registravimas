@@ -6,8 +6,9 @@ import MediaViewer, { type MediaViewerItem } from "./components/media-viewer";
 import RecordThumb from "./components/record-thumb";
 import MediaFileButton from "./components/media-file-button";
 import ResponsiblePicker from "./components/responsible-picker";
-import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, isRecordArchived, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList } from "@/lib/constants";
+import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, clientRecordTypes, isRecordArchived, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList } from "@/lib/constants";
 import { buildResponsiblePayload, normalizeResponsibleParty, responsibleClassSlug, responsibleDisplay, responsibleOtherText, type ResponsibleParty } from "@/lib/responsible";
+import { copyText, shareOrCopyText } from "@/lib/copy-text";
 import { createBrowserSupabase } from "@/lib/supabase/client";
 import { errorMessage } from "@/lib/errors";
 import { imageTooLarge, isImageFile, isVideoFile, mediaFileName, mimeOf, videoTooLarge } from "@/lib/media";
@@ -65,6 +66,8 @@ type Defect = {
   room?: string;
   location?: string;
   origin?: "staff" | "client";
+  createdByName?: string;
+  createdByEmail?: string;
   title: string;
   description: string;
   status: Status;
@@ -125,6 +128,7 @@ const initialDefects: Defect[] = [];
 
 const statusTabs: Array<Status | "Visi"> = ["Visi", ...statusList];
 const recordTypes: RecordType[] = [...recordTypeList];
+const clientCaptureTypes: RecordType[] = [...clientRecordTypes];
 
 const recordTypeMeta: Record<RecordType, { icon: string; hint: string; save: string }> = {
   Brokas: { icon: "!", hint: "Defektas objekte · reikia foto", save: "Išsaugoti broką" },
@@ -233,6 +237,16 @@ function recordTypeClass(recordType: RecordType) {
   return `record-type type-${value}`;
 }
 
+function isClientOrigin(defect: { origin?: string }) {
+  return defect.origin === "client";
+}
+
+function originBadge(defect: { origin?: string; createdByName?: string; createdByEmail?: string }) {
+  if (!isClientOrigin(defect)) return null;
+  const who = defect.createdByName || defect.createdByEmail || "Klientas";
+  return <span className="origin-badge origin-client" title={defect.createdByEmail || who}>Klientas · {who}</span>;
+}
+
 function formatPrice(value?: string) {
   if (!value) return "Nenurodyta";
   const number = Number(value.replace(",", "."));
@@ -301,6 +315,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const [responsibleFilter, setResponsibleFilter] = useState("Visi");
   const [priorityFilter, setPriorityFilter] = useState("Visi");
   const [typeFilter, setTypeFilter] = useState<RecordType | "Visi">("Visi");
+  const [originFilter, setOriginFilter] = useState<"Visi" | "Distyle" | "Klientas">("Visi");
   const [reportOptions, setReportOptions] = useState({ photos: true, descriptions: true, responsibility: true, commercial: true });
   const [connection, setConnection] = useState<"loading" | "synced" | "demo">(() => (initialData ? "synced" : "loading"));
   const [toast, setToast] = useState("");
@@ -322,56 +337,63 @@ export default function Home({ initialData = null }: HomeProps) {
     const storedType = window.localStorage.getItem(ACTIVE_TYPE_STORAGE_KEY) as RecordType | null;
     if (storedProjectId) projectIdRef.current = storedProjectId;
     if (storedType && recordTypes.includes(storedType)) setCaptureRecordType(storedType);
-    const invite = new URLSearchParams(window.location.search).get("invite");
-    const join = new URLSearchParams(window.location.search).get("join");
-    fetch("/api/register", { cache: "no-store" })
-      .then(async (response) => {
-        const payload = await response.json().catch(() => ({})) as { projects?: Project[]; defects?: Defect[]; user?: Profile; error?: string };
-        if (!response.ok) throw new Error(payload.error || "Duomenų bazė nepasiekiama");
-        return payload;
-      })
-      .then(async (data) => {
+    const params = new URLSearchParams(window.location.search);
+    const invite = params.get("invite");
+    const join = params.get("join");
+
+    async function loadRegister() {
+      const response = await fetch("/api/register", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({})) as { projects?: Project[]; defects?: Defect[]; user?: Profile; error?: string };
+      if (!response.ok) throw new Error(payload.error || "Duomenų bazė nepasiekiama");
+      return payload;
+    }
+
+    (async () => {
+      try {
+        let joinedProjectId = "";
+        if (join) {
+          const joinResponse = await fetch("/api/projects/join", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ token: join }),
+          });
+          const joinPayload = await joinResponse.json() as { projectId?: string; error?: string };
+          if (!joinResponse.ok || !joinPayload.projectId) {
+            if (active) setToast(joinPayload.error || "Nepavyko prisijungti prie projekto");
+          } else {
+            joinedProjectId = joinPayload.projectId;
+          }
+        } else if (invite) {
+          await fetch("/api/invites/accept", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ token: invite }),
+          });
+        }
+
+        const data = await loadRegister();
         if (!active || !data.user || !data.projects || !data.defects) return;
         setProjects(data.projects);
         setDefects(normalizeDefects(data.defects));
         setProfile(data.user);
-        const preferredProjectId = data.projects.some((project) => project.id === projectIdRef.current)
-          ? projectIdRef.current
-          : data.projects[0]?.id;
-        if (join) {
-          try {
-            const joinResponse = await fetch("/api/projects/join", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ token: join }),
-            });
-            const joinPayload = await joinResponse.json() as { projectId?: string; error?: string };
-            if (joinResponse.ok && joinPayload.projectId) {
-              projectIdRef.current = joinPayload.projectId;
-              setProjectId(joinPayload.projectId);
-              window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, joinPayload.projectId);
-              setToast(`Prisijungta prie projekto: ${data.projects.find((project) => project.id === joinPayload.projectId)?.name ?? "objektas"}`);
-            } else if (!joinResponse.ok) {
-              setToast(joinPayload.error || "Nepavyko prisijungti prie projekto");
-            }
-          } catch {
-            setToast("Nepavyko prisijungti prie projekto");
-          }
-          window.history.replaceState({}, "", "/");
-        } else if (invite) {
-          void fetch("/api/invites/accept", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: invite }) });
-          window.history.replaceState({}, "", "/");
-        } else if (preferredProjectId) {
-          projectIdRef.current = preferredProjectId;
-          setProjectId(preferredProjectId);
-          window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, preferredProjectId);
+        const nextProjectId = [joinedProjectId, projectIdRef.current, data.projects[0]?.id]
+          .find((id) => id && data.projects!.some((project) => project.id === id)) ?? "";
+        if (nextProjectId) {
+          projectIdRef.current = nextProjectId;
+          setProjectId(nextProjectId);
+          window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextProjectId);
         }
+        if (joinedProjectId) {
+          const name = data.projects.find((project) => project.id === joinedProjectId)?.name ?? "objektas";
+          setToast(`Prisijungta prie objekto: ${name}`);
+        }
+        if (join || invite) window.history.replaceState({}, "", "/");
         setConnection("synced");
-      })
-      .catch(() => {
-        if (!active) return;
-        setConnection("demo");
-      });
+      } catch {
+        if (active) setConnection("demo");
+      }
+    })();
+
     return () => { active = false; };
   }, []);
 
@@ -419,13 +441,17 @@ export default function Home({ initialData = null }: HomeProps) {
     if (announce && nextProject) showToast(`Aktyvus projektas: ${nextProject.name}`);
   }
 
+  const resolvedProjectId = projectId || projects[0]?.id || "";
+  const isClient = profile.role === "client";
+  const isStaff = profile.role === "staff";
+  const captureTypes = isClient ? clientCaptureTypes : recordTypes;
+  const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: isClient ? "Objektas nepriskirtas" : "Nėra projekto", address: "", open: 0, overdue: 0, clientsSeeStaffRecords: false };
+
   function openProjectPicker() {
+    if (isClient) return;
     setProjectSearch("");
     setProjectPickerOpen(true);
   }
-
-  const resolvedProjectId = projectId || projects[0]?.id || "";
-  const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: "Nėra projekto", address: "", open: 0, overdue: 0, clientsSeeStaffRecords: false };
   const filteredProjects = useMemo(() => {
     const term = projectSearch.trim().toLocaleLowerCase("lt");
     if (!term) return projects;
@@ -443,9 +469,12 @@ export default function Home({ initialData = null }: HomeProps) {
       const inResponsible = responsibleFilter === "Visi" || normalizeResponsibleParty(defect.responsible) === responsibleFilter;
       const inPriority = priorityFilter === "Visi" || defect.priority === priorityFilter;
       const inType = typeFilter === "Visi" || defect.recordType === typeFilter;
-      return inProject && inStatus && inSearch && inResponsible && inPriority && inType;
+      const inOrigin = originFilter === "Visi"
+        || (originFilter === "Klientas" ? isClientOrigin(defect) : !isClientOrigin(defect));
+      const clientAllowed = !isClient || defect.recordType !== "Užduotis";
+      return inProject && inStatus && inSearch && inResponsible && inPriority && inType && inOrigin && clientAllowed;
     });
-  }, [activeStatus, defects, priorityFilter, resolvedProjectId, responsibleFilter, search, typeFilter]);
+  }, [activeStatus, defects, isClient, originFilter, priorityFilter, resolvedProjectId, responsibleFilter, search, typeFilter]);
 
   const detail = defects.find((defect) => defect.id === detailId) ?? null;
   const detailMetaDirty = useMemo(() => {
@@ -469,17 +498,19 @@ export default function Home({ initialData = null }: HomeProps) {
   const reportFilterTags = useMemo(() => {
     const tags = [
       typeFilter !== "Visi" ? typeFilter : null,
+      originFilter !== "Visi" ? originFilter : null,
       activeStatus !== "Visi" ? activeStatus : null,
       responsibleFilter !== "Visi" ? responsibleFilter : null,
       priorityFilter !== "Visi" ? priorityFilter : null,
     ].filter(Boolean) as string[];
     return tags.length ? tags : ["Visi filtrai"];
-  }, [activeStatus, priorityFilter, responsibleFilter, typeFilter]);
+  }, [activeStatus, originFilter, priorityFilter, responsibleFilter, typeFilter]);
   const openCount = activeProjectDefects.length;
   const today = new Date().toISOString().slice(0, 10);
   const overdueCount = activeProjectDefects.filter((defect) => defect.due !== "Nenustatyta" && defect.due < today).length;
 
   function openCapture() {
+    if (isClient && captureRecordType === "Užduotis") setCaptureRecordType("Brokas");
     setCaptureStep("type");
     setShowCaptureNote(false);
     setShowCaptureMore(false);
@@ -498,6 +529,7 @@ export default function Home({ initialData = null }: HomeProps) {
   }
 
   function chooseCaptureType(type: RecordType) {
+    if (isClient && type === "Užduotis") return;
     setCaptureRecordType(type);
     window.localStorage.setItem(ACTIVE_TYPE_STORAGE_KEY, type);
     setCaptureStep("form");
@@ -514,7 +546,7 @@ export default function Home({ initialData = null }: HomeProps) {
     const room = String(data.get("room") ?? "").trim();
     const zone = String(data.get("zone") ?? "").trim();
     if (!resolvedProjectId) {
-      showToast("Pirmiausia pasirinkite projektą");
+      showToast(isClient ? "Nuoroda nepriskyrė objekto. Paprašykite Distyle naujos nuorodos." : "Pirmiausia pasirinkite projektą");
       return;
     }
     if (!title || !room || !zone) {
@@ -527,6 +559,10 @@ export default function Home({ initialData = null }: HomeProps) {
     }
     if (captureResponsible === RESPONSIBLE_OTHER && !captureResponsibleOther.trim()) {
       showToast("Pasirinkus „Kita“, įrašykite kas atsakingas");
+      return;
+    }
+    if (isClient && captureRecordType === "Užduotis") {
+      showToast("Klientai negali kurti užduočių");
       return;
     }
     window.localStorage.setItem(ACTIVE_TYPE_STORAGE_KEY, captureRecordType);
@@ -1155,7 +1191,7 @@ export default function Home({ initialData = null }: HomeProps) {
       const response = await fetch("/api/projects/share-link", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId: resolvedProjectId }),
+        body: JSON.stringify({ projectId: resolvedProjectId, origin: window.location.origin }),
       });
       const payload = await response.json() as { link?: string; error?: string };
       if (!response.ok || !payload.link) throw new Error(payload.error || "Nuorodos sukurti nepavyko");
@@ -1169,8 +1205,11 @@ export default function Home({ initialData = null }: HomeProps) {
 
   async function copyShareLink() {
     if (!shareLink) return;
-    await navigator.clipboard.writeText(shareLink).catch(() => undefined);
-    showToast("Nuoroda nukopijuota");
+    const result = await shareOrCopyText(shareLink, `Brokų registravimas (${activeProject.name})`);
+    if (result === "shared") showToast("Nuoroda paruošta siuntimui");
+    else if (result === "copied") showToast("Nuoroda nukopijuota");
+    else if (result === "cancelled") return;
+    else showToast("Laikykite ant nuorodos — pasirinkite „Kopijuoti“");
   }
 
   async function sendInvite(event: FormEvent<HTMLFormElement>) {
@@ -1180,14 +1219,14 @@ export default function Home({ initialData = null }: HomeProps) {
       const response = await fetch("/api/invites", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId, email: inviteEmail.trim() }),
+        body: JSON.stringify({ projectId, email: inviteEmail.trim(), origin: window.location.origin }),
       });
       const payload = await response.json() as { invite?: { token: string }; error?: string };
       if (!response.ok || !payload.invite) throw new Error(payload.error || "Kvietimo sukurti nepavyko");
       const link = `${window.location.origin}/login?invite=${payload.invite.token}`;
       setInviteLink(link);
-      await navigator.clipboard.writeText(link).catch(() => undefined);
-      showToast("Kvietimo nuoroda nukopijuota");
+      const copied = await copyText(link);
+      showToast(copied ? "Kvietimo nuoroda nukopijuota" : "Nuoroda sukurta — nukopijuokite iš lauko");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Kvietimo sukurti nepavyko");
     }
@@ -1207,7 +1246,7 @@ export default function Home({ initialData = null }: HomeProps) {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isClient ? "client-mode" : ""}`}>
       <aside className={`sidebar ${mobileMenu ? "sidebar-open" : ""}`}>
         <div className="brand-row">
           <div className="brand-mark">D</div>
@@ -1216,15 +1255,34 @@ export default function Home({ initialData = null }: HomeProps) {
         </div>
 
         <nav className="main-nav" aria-label="Pagrindinis meniu">
-          <button className="nav-active"><span>▦</span> Apžvalga</button>
-          <button onClick={openProjectPicker}><span>□</span> Projektai <b>{projects.length}</b></button>
-          <button onClick={() => { setTypeFilter("Užduotis"); setMobileMenu(false); }}><span>✓</span> Užduotys <b>{defects.filter((item) => item.recordType === "Užduotis" && !isRecordArchived(item)).length}</b></button>
-          <button onClick={() => { setReportMode(true); setMobileMenu(false); }}><span>⇩</span> Ataskaitos</button>
+          {isStaff ? (
+            <>
+              <button className="nav-active"><span>▦</span> Apžvalga</button>
+              <button type="button" className="nav-invite" onClick={() => { void openInviteModal(); setMobileMenu(false); }}><span>🔗</span> Klientų nuoroda</button>
+              <button onClick={() => { openProjectPicker(); setMobileMenu(false); }}><span>□</span> Projektai <b>{projects.length}</b></button>
+              <button onClick={() => { setTypeFilter("Užduotis"); setMobileMenu(false); }}><span>✓</span> Užduotys <b>{defects.filter((item) => item.recordType === "Užduotis" && !isRecordArchived(item)).length}</b></button>
+              <button onClick={() => { setReportMode(true); setMobileMenu(false); }}><span>⇩</span> Ataskaitos</button>
+            </>
+          ) : (
+            <>
+              <button className="nav-active" onClick={() => setMobileMenu(false)}><span>▦</span> Mano įrašai</button>
+              <button type="button" onClick={() => { openCapture(); setMobileMenu(false); }}><span>＋</span> Fiksuoti</button>
+            </>
+          )}
         </nav>
 
-        <div className="sidebar-label"><span>Aktyvūs projektai</span>{profile.role === "staff" && <button onClick={() => setNewProjectOpen(true)} aria-label="Pridėti projektą">+</button>}</div>
+        <div className="sidebar-label"><span>{isClient ? "Objektas" : "Aktyvūs projektai"}</span>{isStaff && <button onClick={() => setNewProjectOpen(true)} aria-label="Pridėti projektą">+</button>}</div>
         <div className="project-list">
-          {projects.map((project) => (
+          {isClient ? (
+            activeProject.id ? (
+              <button type="button" className="project-active" disabled>
+                <span className="project-dot" />
+                <span><strong>{activeProject.name}</strong><small>{activeProject.address || "Fiksavimas tik šiame objekte"}</small></span>
+              </button>
+            ) : (
+              <p className="project-choice-empty">Objektas nepriskirtas</p>
+            )
+          ) : projects.map((project) => (
             <button key={project.id} className={project.id === resolvedProjectId ? "project-active" : ""} onClick={() => selectProject(project.id)}>
               <span className="project-dot" />
               <span><strong>{project.name}</strong><small>{project.address || "Informaciją papildysite vėliau"}</small></span>
@@ -1253,35 +1311,63 @@ export default function Home({ initialData = null }: HomeProps) {
         <div className="workspace">
           <section className="project-heading">
             <div>
-              <div className="eyebrow"><span className="live-dot" /> Aktyvus projektas</div>
+              <div className="eyebrow"><span className="live-dot" /> {isClient ? "Fiksuojate objekte" : "Aktyvus projektas"}</div>
               <div className="title-row"><h1>{activeProject.name}</h1></div>
-              <p>{activeProject.address || "Projekto informaciją galėsite papildyti vėliau"}</p>
+              <p>{activeProject.address || (isClient ? "Čia fiksuojate brokus, apimtis ir papildomas apimtis." : "Projekto informaciją galėsite papildyti vėliau")}</p>
             </div>
+            {isStaff && (
+              <button type="button" className="mobile-client-link" onClick={() => void openInviteModal()}>
+                <span className="mobile-client-link-icon" aria-hidden>🔗</span>
+                <span className="mobile-client-link-text">
+                  <strong>Klientų nuoroda</strong>
+                  <small>Siųskite klientui — galės fiksuoti brokus objekte</small>
+                </span>
+                <span className="mobile-client-link-chevron" aria-hidden>›</span>
+              </button>
+            )}
+            {isClient && (
+              <button type="button" className="mobile-client-link" onClick={openCapture}>
+                <span className="mobile-client-link-icon" aria-hidden>＋</span>
+                <span className="mobile-client-link-text">
+                  <strong>Naujas fiksavimas</strong>
+                  <small>Brokas, apimtis arba papildoma apimtis</small>
+                </span>
+                <span className="mobile-client-link-chevron" aria-hidden>›</span>
+              </button>
+            )}
+            {isClient && !resolvedProjectId && (
+              <p className="share-link-hint">Ši paskyra dar nepriskirta objektui. Atidarykite Distyle atsiųstą nuorodą dar kartą.</p>
+            )}
+            {isStaff && (
             <div className="heading-actions">
-              {profile.role === "staff" && <button className="secondary-button" onClick={() => void openInviteModal()}>Klientams <span>↗</span></button>}
-              <button className="secondary-button" onClick={() => setReportMode(true)}>Ataskaita / PDF <span>↗</span></button>
+              <button className="secondary-button heading-invite-button" onClick={() => void openInviteModal()}>Klientų nuoroda</button>
+              <button className="secondary-button" onClick={() => setReportMode(true)}>Ataskaita / PDF</button>
             </div>
+            )}
           </section>
 
+          {!isClient && (
           <section className="metrics" aria-label="Objekto suvestinė">
             <article><div><span>Atviri įrašai</span><b className="metric-icon red">!</b></div><strong>{openCount}</strong><p>Brokai, apimtys ir užduotys</p></article>
             <article><div><span>Pradelsti</span><b className="metric-icon amber">↗</b></div><strong>{overdueCount}</strong><p>Reikia jūsų dėmesio</p></article>
             <article><div><span>Vykdomi</span><b className="metric-icon blue">→</b></div><strong>{activeProjectDefects.filter((item) => item.status === "Vykdoma").length}</strong><p>Priskirti atsakingiems</p></article>
             <article><div><span>Baigti</span><b className="metric-icon green">✓</b></div><strong>{archivedCount}</strong><p>Archyvuoti įrašai</p></article>
           </section>
+          )}
 
           <section className="register-card">
             <div className="register-header">
-              <div><h2>Objekto įrašai</h2><p>{visibleDefects.length} įrašai pagal pasirinktus filtrus</p></div>
-              <div className="register-actions"><button className="secondary-button" onClick={() => setFiltersOpen((value) => !value)}>Filtrai <span className="filter-count">{Number(responsibleFilter !== "Visi") + Number(priorityFilter !== "Visi") + Number(typeFilter !== "Visi")}</span></button><button className="secondary-button">Rikiuoti: Naujausi <span>⌄</span></button></div>
+              <div><h2>{isClient ? "Jūsų fiksavimai" : "Objekto įrašai"}</h2><p>{isClient ? `${visibleDefects.length} įrašai šiame objekte` : `${visibleDefects.length} įrašai pagal pasirinktus filtrus`}</p></div>
+              <div className="register-actions"><button className="secondary-button" onClick={() => setFiltersOpen((value) => !value)}>Filtrai <span className="filter-count">{Number(responsibleFilter !== "Visi") + Number(priorityFilter !== "Visi") + Number(typeFilter !== "Visi") + Number(isStaff && originFilter !== "Visi")}</span></button><button className="secondary-button">Rikiuoti: Naujausi <span>⌄</span></button></div>
             </div>
 
             {filtersOpen && (
               <div className="filter-panel">
-                <label><span>Įrašo tipas</span><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as RecordType | "Visi")}><option>Visi</option>{recordTypes.map((item) => <option key={item}>{item}</option>)}</select></label>
+                <label><span>Įrašo tipas</span><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as RecordType | "Visi")}><option>Visi</option>{captureTypes.map((item) => <option key={item}>{item}</option>)}</select></label>
+                {isStaff && <label><span>Kas įkėlė</span><select value={originFilter} onChange={(event) => setOriginFilter(event.target.value as "Visi" | "Distyle" | "Klientas")}><option>Visi</option><option>Distyle</option><option>Klientas</option></select></label>}
                 <label><span>Atsakingas</span><select value={responsibleFilter} onChange={(event) => setResponsibleFilter(event.target.value)}><option>Visi</option>{responsibilities.map((item) => <option key={item}>{item}</option>)}</select></label>
                 <label><span>Prioritetas</span><select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}><option>Visi</option><option>Kritinis</option><option>Aukštas</option><option>Vidutinis</option><option>Žemas</option></select></label>
-                <button onClick={() => { setResponsibleFilter("Visi"); setPriorityFilter("Visi"); setTypeFilter("Visi"); }}>Išvalyti filtrus</button>
+                <button onClick={() => { setResponsibleFilter("Visi"); setPriorityFilter("Visi"); setTypeFilter("Visi"); setOriginFilter("Visi"); }}>Išvalyti filtrus</button>
               </div>
             )}
 
@@ -1319,7 +1405,7 @@ export default function Home({ initialData = null }: HomeProps) {
                           fallbackLabel={initials(defect.zone.split("·")[0])}
                           placeholderClass={`photo-${Number(defect.id.length) % 4}`}
                         />
-                        <div className="defect-main"><div><span className={`priority-dot priority-${defect.priority.toLowerCase()}`} /> <b>{defect.code}</b><span className={recordTypeClass(defect.recordType)}>{defect.recordType}</span><small>{placeLabel(defect)}</small></div><strong>{defect.title}</strong>{summary ? <p>{summary}</p> : null}</div>
+                        <div className="defect-main"><div><span className={`priority-dot priority-${defect.priority.toLowerCase()}`} /> <b>{defect.code}</b><span className={recordTypeClass(defect.recordType)}>{defect.recordType}</span>{isStaff && originBadge(defect)}<small>{placeLabel(defect)}</small></div><strong>{defect.title}</strong>{summary ? <p>{summary}</p> : null}</div>
                       </td>
                       <td><span className={statusClass(defect.status)}><i />{defect.status}</span></td>
                       <td><div className="responsible-cell">{(() => { const r = responsibleCell(defect); return (<><span className={`company-avatar company-${r.slug}`}>{initials(r.party)}</span><div><strong>{r.party}</strong><small>{r.other || "—"}</small></div></>); })()}</div></td>
@@ -1338,7 +1424,7 @@ export default function Home({ initialData = null }: HomeProps) {
                   const summary = mediaLine(photos.length, videos.length, items.length, items[0]?.issue ?? defect.description);
                   return (
                   <article key={defect.id} className={reportMode && !defect.selected ? "report-excluded" : ""} onClick={() => setDetailId(defect.id)}>
-                    <div className="mobile-card-top"><label onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={defect.selected} onChange={() => toggleSelected(defect.id)} /></label><span className={`priority-dot priority-${defect.priority.toLowerCase()}`} /><b>{defect.code}</b><span className={recordTypeClass(defect.recordType)}>{defect.recordType}</span><small>{placeLabel(defect)}</small><span className={statusClass(defect.status)}><i />{defect.status}</span></div>
+                    <div className="mobile-card-top"><label onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={defect.selected} onChange={() => toggleSelected(defect.id)} /></label><span className={`priority-dot priority-${defect.priority.toLowerCase()}`} /><b>{defect.code}</b><span className={recordTypeClass(defect.recordType)}>{defect.recordType}</span>{isStaff && originBadge(defect)}<small>{placeLabel(defect)}</small><span className={statusClass(defect.status)}><i />{defect.status}</span></div>
                     <div className="mobile-card-body">
                       <RecordThumb
                         recordId={defect.id}
@@ -1374,7 +1460,7 @@ export default function Home({ initialData = null }: HomeProps) {
               const photos = defectPhotosFor(defect);
               const items = defectItemsFor(defect);
               return <article key={defect.id}>
-                <div className="print-defect-head"><div><small>{defect.code} · {defect.recordType} · {placeLabel(defect)}</small><h2>{defect.title}</h2></div><span className={statusClass(defect.status)}><i />{defect.status}</span></div>
+                <div className="print-defect-head"><div><small>{defect.code} · {defect.recordType} · {isClientOrigin(defect) ? `Klientas (${defect.createdByName || defect.createdByEmail || "—"})` : "Distyle"} · {placeLabel(defect)}</small><h2>{defect.title}</h2></div><span className={statusClass(defect.status)}><i />{defect.status}</span></div>
                 {reportOptions.photos && photos.length > 0 && <div className="print-photo-grid">{photos.map((photo, index) => <figure key={photo.id}><img src={photo.url} alt={`${defect.title}, nuotrauka ${index + 1}`} />{photo.caption && <figcaption>{photo.caption}</figcaption>}</figure>)}</div>}
                 {reportOptions.descriptions && <div className="print-issues">{items.map((item, index) => <div key={item.id}><b>{index + 1}</b><p><strong>{recordCopy[defect.recordType].issueLabel.replace(" *", "")}:</strong> {item.issue}<br /><strong>{recordCopy[defect.recordType].workLabel}:</strong> {item.requiredWork || "Nenurodyta"}</p></div>)}</div>}
                 {reportOptions.commercial && defect.recordType === "Papildoma apimtis" && <div className="print-commercial"><span>Kas paprašė: <b>{defect.requestedBy || "Nenurodyta"}</b></span><span>Kaina: <b>{formatPrice(defect.price)}</b></span>{defect.notes && <p><b>Pastabos:</b> {defect.notes}</p>}</div>}
@@ -1385,8 +1471,22 @@ export default function Home({ initialData = null }: HomeProps) {
         </div>
       </main>
 
-      <nav className="mobile-bottom-nav" aria-label="Mobilus meniu">
-        <button className="bottom-active" onClick={() => setTypeFilter("Visi")}><span>▦</span>Apžvalga</button><button onClick={openProjectPicker}><span>□</span>Projektai</button><button className="mobile-capture" onClick={openCapture} aria-label="Naujas įrašas">＋</button><button onClick={() => setTypeFilter("Užduotis")}><span>✓</span>Užduotys</button><button onClick={() => setReportMode(true)}><span>⇩</span>Ataskaitos</button>
+      <nav className={`mobile-bottom-nav ${isClient ? "client-bottom-nav" : ""}`} aria-label="Mobilus meniu">
+        {isClient ? (
+          <>
+            <button className="bottom-active" onClick={() => setTypeFilter("Visi")}><span>▦</span>Mano įrašai</button>
+            <button className="mobile-capture" onClick={openCapture} aria-label="Naujas fiksavimas">＋</button>
+            <form action="/logout" method="post"><button type="submit"><span>⎋</span>Atsijungti</button></form>
+          </>
+        ) : (
+          <>
+            <button className="bottom-active" onClick={() => setTypeFilter("Visi")}><span>▦</span>Apžvalga</button>
+            <button onClick={openProjectPicker}><span>□</span>Projektai</button>
+            <button className="mobile-capture" onClick={openCapture} aria-label="Naujas įrašas">＋</button>
+            <button onClick={() => setTypeFilter("Užduotis")}><span>✓</span>Užduotys</button>
+            <button onClick={() => setReportMode(true)}><span>⇩</span>Ataskaitos</button>
+          </>
+        )}
       </nav>
 
       {captureOpen && (
@@ -1398,7 +1498,7 @@ export default function Home({ initialData = null }: HomeProps) {
               <div className="panel-title"><div><span>Naujas įrašas</span><h2 id="capture-title">Kas tai?</h2></div><button type="button" onClick={closeCapture} aria-label="Uždaryti">×</button></div>
               <p className="capture-type-lead">Pasirinkite, ką fiksuojate objekte.</p>
               <div className="capture-type-grid">
-                {recordTypes.map((type) => (
+                {captureTypes.map((type) => (
                   <button type="button" key={type} className={captureRecordType === type ? "type-selected" : ""} onClick={() => chooseCaptureType(type)}>
                     <span>{recordTypeMeta[type].icon}</span>
                     <strong>{type}</strong>
@@ -1412,7 +1512,7 @@ export default function Home({ initialData = null }: HomeProps) {
             <div className="panel-handle" />
             <div className="panel-title"><div><span>Naujas įrašas</span><h2 id="capture-title">{recordCopy[captureRecordType].title}</h2></div><button type="button" onClick={closeCapture} aria-label="Uždaryti">×</button></div>
             <button type="button" className="capture-back" onClick={() => setCaptureStep("type")}>← {captureRecordType} · keisti tipą</button>
-            <div className="capture-project"><span className="live-dot" /><div><small>Aktyvus projektas</small><strong>{activeProject.name}</strong></div>{projects.length > 1 && <button type="button" onClick={openProjectPicker}>Keisti</button>}</div>
+            <div className="capture-project"><span className="live-dot" /><div><small>Objektas</small><strong>{activeProject.name}</strong></div>{isStaff && projects.length > 1 && <button type="button" onClick={openProjectPicker}>Keisti</button>}</div>
             <div className="form-grid capture-essentials">
               <label className="wide"><span>{recordCopy[captureRecordType].titleLabel}</span><input name="title" required placeholder={recordCopy[captureRecordType].titlePlaceholder} enterKeyHint="next" autoComplete="off" /></label>
               <label><span>Patalpa *</span><input name="room" required placeholder="Pvz., Miegamasis" enterKeyHint="next" autoComplete="off" /></label>
@@ -1543,7 +1643,7 @@ export default function Home({ initialData = null }: HomeProps) {
       )}
 
 
-      {projectPickerOpen && (
+      {projectPickerOpen && isStaff && (
         <div className="modal-layer project-modal-layer project-picker-layer" role="dialog" aria-modal="true" aria-labelledby="project-picker-title">
           <button className="modal-scrim" onClick={() => setProjectPickerOpen(false)} aria-label="Uždaryti" />
           <section className="project-modal project-picker-modal">
@@ -1588,16 +1688,25 @@ export default function Home({ initialData = null }: HomeProps) {
           <button className="modal-scrim" onClick={() => setInviteOpen(false)} aria-label="Uždaryti" />
           <form className="project-modal invite-modal" onSubmit={sendInvite}>
             <div className="panel-title"><div><span>{activeProject.name}</span><h2 id="invite-title">Klientų nuoroda</h2></div><button type="button" onClick={() => setInviteOpen(false)} aria-label="Uždaryti">×</button></div>
-            <p>Nusiųskite šią nuorodą BURGA ar kitam objektui — klientai prisijungs savo el. paštu ir galės fiksuoti brokus.</p>
+            <p>Pirmą kartą klientas atidaro šią nuorodą ir susikuria paskyrą (savo el. paštas + slaptažodis). Kitą kartą jam užtenka atidaryti programėlę (vėliau <b>brokai.distyle.lt</b>) ir prisijungti tuo pačiu acc — nuorodos nebereikia, matys tik šį objektą.</p>
             <label className="invite-toggle"><input type="checkbox" checked={Boolean(activeProject.clientsSeeStaffRecords)} onChange={() => void toggleClientVisibility()} /><span>Klientas mato ir Distyle pažymėtus brokus</span></label>
             <div className="share-link-box">
               <strong>Bendroji nuoroda</strong>
               {shareLinkLoading ? <p className="share-link-loading">Ruošiama nuoroda…</p> : null}
               {shareLink ? (
                 <>
-                  <p className="share-link-url">{shareLink}</p>
+                  <input
+                    className="share-link-url"
+                    readOnly
+                    value={shareLink}
+                    onFocus={(event) => event.currentTarget.select()}
+                    aria-label="Klientų nuoroda"
+                  />
+                  {shareLink.includes("localhost") || shareLink.includes("127.0.0.1") || shareLink.includes("0.0.0.0") ? (
+                    <p className="share-link-hint">Telefone atidarykite programėlę per Wi‑Fi adresą (pvz. http://192.168.x.x:3010) ir sugeneruokite nuorodą iš naujo.</p>
+                  ) : null}
                   <div className="share-link-actions">
-                    <button type="button" className="secondary-button" onClick={() => void copyShareLink()}>Kopijuoti</button>
+                    <button type="button" className="secondary-button" onClick={() => void copyShareLink()}>Kopijuoti / Dalintis</button>
                     <a className="secondary-button" href={`https://wa.me/?text=${encodeURIComponent(`Brokų registravimas (${activeProject.name}): ${shareLink}`)}`} target="_blank" rel="noopener noreferrer">WhatsApp</a>
                   </div>
                 </>
@@ -1616,7 +1725,7 @@ export default function Home({ initialData = null }: HomeProps) {
 
       {detail && (
         <div className={`detail-drawer ${detailId ? "drawer-open" : ""}`}>
-          <div className="drawer-header"><div><span>{detail.code} <em className={recordTypeClass(detail.recordType)}>{detail.recordType}</em></span><small>{placeLabel(detail)}</small></div><button onClick={() => setDetailId(null)} aria-label="Uždaryti">×</button></div>
+          <div className="drawer-header"><div><span>{detail.code} <em className={recordTypeClass(detail.recordType)}>{detail.recordType}</em>{isStaff && originBadge(detail)}</span><small>{placeLabel(detail)}{isStaff && isClientOrigin(detail) && detail.createdByEmail ? ` · įkėlė ${detail.createdByEmail}` : isStaff ? " · Distyle" : ""}</small></div><button onClick={() => setDetailId(null)} aria-label="Uždaryti">×</button></div>
           <div
             className={`drawer-gallery ${detailPhotoDragActive ? "drawer-gallery-drag-active" : ""}`}
             onDragEnter={(event) => { event.preventDefault(); setDetailPhotoDragActive(true); }}
@@ -1712,7 +1821,7 @@ export default function Home({ initialData = null }: HomeProps) {
       )}
       {detailId && <button className="drawer-scrim" onClick={() => setDetailId(null)} aria-label="Uždaryti detalę" />}
 
-      {reportMode && (
+      {reportMode && isStaff && (
         <div className="report-modal-layer" role="dialog" aria-modal="true" aria-labelledby="report-title">
           <button className="modal-scrim" onClick={() => setReportMode(false)} aria-label="Uždaryti ataskaitą" />
           <section className="report-builder">

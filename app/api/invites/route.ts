@@ -1,4 +1,5 @@
 import { apiError, requireUser } from "@/lib/auth";
+import { resolvePublicOrigin } from "@/lib/public-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -6,7 +7,7 @@ export async function POST(request: Request) {
   try {
     const { supabase, profile } = await requireUser();
     if (profile.role !== "staff") return Response.json({ error: "Kviesti klientus gali tik Distyle komanda." }, { status: 403 });
-    const payload = await request.json() as { projectId?: string; email?: string };
+    const payload = await request.json() as { projectId?: string; email?: string; origin?: string };
     const projectId = payload.projectId?.trim() ?? "";
     const email = payload.email?.trim().toLowerCase() ?? "";
     if (!projectId || !email.includes("@")) return Response.json({ error: "Nurodykite projektą ir kliento el. paštą." }, { status: 400 });
@@ -20,8 +21,8 @@ export async function POST(request: Request) {
     }).select("*").single();
     if (error) throw error;
 
-    const origin = process.env.NEXT_PUBLIC_APP_URL || "";
-    const link = `${origin || ""}/login?invite=${invite.token}`;
+    const origin = resolvePublicOrigin(request, payload.origin);
+    const link = `${origin}/login?invite=${invite.token}`;
     return Response.json({ invite: { ...invite, link } }, { status: 201 });
   } catch (error) {
     return apiError(error);

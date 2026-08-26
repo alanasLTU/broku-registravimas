@@ -5,6 +5,7 @@ export const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
 export const MEDIA_BUCKET = "record-media";
 
 export const recordTypes = ["Brokas", "Apimtis", "Papildoma apimtis", "Užduotis"] as const;
+export const clientRecordTypes = ["Brokas", "Apimtis", "Papildoma apimtis"] as const;
 export const statuses = ["Naujas", "Planuojamas", "Vykdoma", "Baigtas"] as const;
 export const COMPLETED_STATUS = "Baigtas" as const;
 export const LEGACY_COMPLETED_STATUSES = ["Baigtas", "Uždaryta"] as const;

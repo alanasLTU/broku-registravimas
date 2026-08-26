@@ -5,8 +5,8 @@ import { SEED_STAFF_EMAIL, SEED_STAFF_PASSWORD } from "@/lib/seed-login";
 
 export default function LoginForm({ invite, join }: { invite: string; join: string }) {
   const guestFlow = Boolean(invite || join);
-  const [email, setEmail] = useState(guestFlow ? "" : SEED_STAFF_EMAIL);
-  const [password, setPassword] = useState(guestFlow ? "" : SEED_STAFF_PASSWORD);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "working" | "error">("idle");
   const [message, setMessage] = useState("");
 
@@ -58,17 +58,29 @@ export default function LoginForm({ invite, join }: { invite: string; join: stri
       <form className="login-form" onSubmit={submit} noValidate>
         <label>
           <span>El. paštas</span>
-          <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder={guestFlow ? "jusu@imone.lt" : undefined} />
+          <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="jusu@imone.lt" />
         </label>
         <label>
           <span>Slaptažodis</span>
-          <input type="password" required minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={guestFlow ? "new-password" : "current-password"} placeholder={guestFlow ? "Bent 6 simboliai" : undefined} />
+          <input type="password" required minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={guestFlow ? "new-password" : "current-password"} placeholder="Bent 6 simboliai" />
         </label>
         <button className="primary-button" type="submit" disabled={status === "working"}>
           {status === "working" ? "Jungiamasi…" : guestFlow ? "Prisijungti / registruotis" : "Prisijungti"}
         </button>
         {message ? <p className="login-error">{message}</p> : null}
       </form>
+      {!guestFlow ? (
+        <button
+          type="button"
+          className="login-staff-fill"
+          onClick={() => {
+            setEmail(SEED_STAFF_EMAIL);
+            setPassword(SEED_STAFF_PASSWORD);
+          }}
+        >
+          Distyle testas: užpildyti {SEED_STAFF_EMAIL}
+        </button>
+      ) : null}
     </>
   );
 }
