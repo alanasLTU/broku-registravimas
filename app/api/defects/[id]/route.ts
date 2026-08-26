@@ -20,7 +20,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     };
     const itemsProvided = Array.isArray(payload.items);
     const itemPayload = itemsProvided
-      ? payload.items.slice(0, 20).map((value) => {
+      ? (payload.items as unknown[]).slice(0, 20).map((value) => {
         const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
         return {
           id: typeof item.id === "string" && !item.id.startsWith("legacy-") ? item.id : crypto.randomUUID(),
