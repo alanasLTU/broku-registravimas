@@ -1,5 +1,6 @@
 import { apiError, requireUser } from "@/lib/auth";
 import { COMPLETED_STATUS, isClientRecordType, isRecordType, normalizeStatus, priorities, responsibilities, statuses } from "@/lib/constants";
+import { asUuid } from "@/lib/ids";
 import { mapRecord, type RecordRow } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
@@ -23,7 +24,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       ? (payload.items as unknown[]).slice(0, 20).map((value) => {
         const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
         return {
-          id: typeof item.id === "string" && !item.id.startsWith("legacy-") ? item.id : crypto.randomUUID(),
+          id: typeof item.id === "string" ? asUuid(item.id) : crypto.randomUUID(),
           issue: typeof item.issue === "string" ? item.issue.trim().slice(0, 2000) : "",
           requiredWork: typeof item.requiredWork === "string" ? item.requiredWork.trim().slice(0, 2000) : "",
         };

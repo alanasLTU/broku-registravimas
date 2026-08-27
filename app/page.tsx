@@ -7,7 +7,7 @@ export default async function Page() {
   try {
     const initialData = await loadRegisterPayload();
     return <Home initialData={initialData} />;
-  } catch {
+    } catch {
     return <Home initialData={null} />;
   }
 }

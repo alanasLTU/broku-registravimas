@@ -6,7 +6,7 @@ import MediaViewer, { type MediaViewerItem } from "./components/media-viewer";
 import RecordThumb from "./components/record-thumb";
 import MediaFileButton from "./components/media-file-button";
 import ResponsiblePicker from "./components/responsible-picker";
-import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, clientRecordTypes, isRecordArchived, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList } from "@/lib/constants";
+import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, clientRecordTypes, isProjectCompleted, isRecordArchived, normalizeProjectStatus, normalizeStatus, projectStatuses, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectStatus } from "@/lib/constants";
 import { buildResponsiblePayload, normalizeResponsibleParty, responsibleClassSlug, responsibleDisplay, responsibleOtherText, type ResponsibleParty } from "@/lib/responsible";
 import { copyText, shareOrCopyText } from "@/lib/copy-text";
 import { createBrowserSupabase } from "@/lib/supabase/client";
@@ -24,6 +24,8 @@ type Project = {
   address: string;
   open: number;
   overdue: number;
+  status?: ProjectStatus;
+  archived?: boolean;
   clientsSeeStaffRecords?: boolean;
 };
 
@@ -304,11 +306,17 @@ export default function Home({ initialData = null }: HomeProps) {
   const [videoDrafts, setVideoDrafts] = useState<VideoDraft[]>([]);
   const [photoDragActive, setPhotoDragActive] = useState(false);
   const [detailPhotoDragActive, setDetailPhotoDragActive] = useState(false);
-  const [issueDrafts, setIssueDrafts] = useState<DefectItem[]>([{ id: "new-issue", issue: "", requiredWork: "" }]);
+  const [issueDrafts, setIssueDrafts] = useState<DefectItem[]>([blankIssue()]);
   const [mediaViewerIndex, setMediaViewerIndex] = useState<number | null>(null);
   const [captureViewerIndex, setCaptureViewerIndex] = useState<number | null>(null);
   const [showDetailNote, setShowDetailNote] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [editProjectId, setEditProjectId] = useState<string | null>(null);
+  const [editProjectName, setEditProjectName] = useState("");
+  const [editProjectAddress, setEditProjectAddress] = useState("");
+  const [editProjectStatus, setEditProjectStatus] = useState<ProjectStatus>("Vykdomas");
+  const [editProjectSaving, setEditProjectSaving] = useState(false);
+  const [showCompletedProjects, setShowCompletedProjects] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectSearch, setProjectSearch] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -407,7 +415,7 @@ export default function Home({ initialData = null }: HomeProps) {
   }, [detailId]);
 
   useEffect(() => {
-    const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen;
+    const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen || Boolean(editProjectId);
     if (!modalOpen) return;
     const { body } = document;
     const previousOverflow = body.style.overflow;
@@ -415,7 +423,7 @@ export default function Home({ initialData = null }: HomeProps) {
     return () => {
       body.style.overflow = previousOverflow;
     };
-  }, [captureOpen, completeOpen, detailId, filtersOpen, inviteOpen, mediaViewerIndex, newProjectOpen, photoEditorTarget, projectPickerOpen, reportMode]);
+  }, [captureOpen, completeOpen, detailId, editProjectId, filtersOpen, inviteOpen, mediaViewerIndex, newProjectOpen, photoEditorTarget, projectPickerOpen, reportMode]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -445,18 +453,28 @@ export default function Home({ initialData = null }: HomeProps) {
   const isClient = profile.role === "client";
   const isStaff = profile.role === "staff";
   const captureTypes = isClient ? clientCaptureTypes : recordTypes;
-  const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: isClient ? "Objektas nepriskirtas" : "Nėra projekto", address: "", open: 0, overdue: 0, clientsSeeStaffRecords: false };
+  const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: isClient ? "Objektas nepriskirtas" : "Nėra projekto", address: "", open: 0, overdue: 0, status: "Vykdomas" as ProjectStatus, archived: false, clientsSeeStaffRecords: false };
+  const projectCompleted = isProjectCompleted(activeProject);
 
   function openProjectPicker() {
     if (isClient) return;
     setProjectSearch("");
     setProjectPickerOpen(true);
   }
+  const sidebarProjects = useMemo(() => {
+    const active = projects.filter((project) => !isProjectCompleted(project));
+    const current = projects.find((project) => project.id === resolvedProjectId);
+    if (current && isProjectCompleted(current) && !active.some((project) => project.id === current.id)) {
+      return [current, ...active];
+    }
+    return active;
+  }, [projects, resolvedProjectId]);
   const filteredProjects = useMemo(() => {
+    const source = showCompletedProjects ? projects : projects.filter((project) => !isProjectCompleted(project));
     const term = projectSearch.trim().toLocaleLowerCase("lt");
-    if (!term) return projects;
-    return projects.filter((project) => `${project.name} ${project.address}`.toLocaleLowerCase("lt").includes(term));
-  }, [projectSearch, projects]);
+    if (!term) return source;
+    return source.filter((project) => `${project.name} ${project.address}`.toLocaleLowerCase("lt").includes(term));
+  }, [projectSearch, projects, showCompletedProjects]);
   const visibleDefects = useMemo(() => {
     const term = search.trim().toLocaleLowerCase("lt");
     return defects.filter((defect) => {
@@ -510,6 +528,10 @@ export default function Home({ initialData = null }: HomeProps) {
   const overdueCount = activeProjectDefects.filter((defect) => defect.due !== "Nenustatyta" && defect.due < today).length;
 
   function openCapture() {
+    if (projectCompleted) {
+      showToast("Projektas baigtas. Pakeiskite būseną į „Vykdomas“, jei vėl fiksuojate.");
+      return;
+    }
     if (isClient && captureRecordType === "Užduotis") setCaptureRecordType("Brokas");
     setCaptureStep("type");
     setShowCaptureNote(false);
@@ -1094,7 +1116,7 @@ export default function Home({ initialData = null }: HomeProps) {
     const data = new FormData(form);
     const name = String(data.get("name") ?? "").trim();
     if (!name) return;
-    const optimistic: Project = { id: randomId(), name, address: "", open: 0, overdue: 0 };
+    const optimistic: Project = { id: randomId(), name, address: "", open: 0, overdue: 0, status: "Vykdomas", archived: false };
     setProjects((items) => [optimistic, ...items]);
     selectProject(optimistic.id, false);
     setNewProjectOpen(false);
@@ -1111,6 +1133,78 @@ export default function Home({ initialData = null }: HomeProps) {
     } catch {
       showToast("Projektas sukurtas demonstracinėje sesijoje");
     }
+  }
+
+  function openEditProject(project: Project) {
+    setEditProjectId(project.id);
+    setEditProjectName(project.name);
+    setEditProjectAddress(project.address ?? "");
+    setEditProjectStatus(normalizeProjectStatus(project.status));
+    setProjectPickerOpen(false);
+  }
+
+  async function saveEditedProject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editProjectId || !editProjectName.trim()) return;
+    setEditProjectSaving(true);
+    try {
+      const response = await fetch("/api/projects", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: editProjectId,
+          name: editProjectName.trim(),
+          address: editProjectAddress.trim(),
+          status: editProjectStatus,
+        }),
+      });
+      const payload = await response.json() as { project?: Project; error?: string };
+      if (!response.ok || !payload.project) throw new Error(payload.error || "Projekto atnaujinti nepavyko");
+      setProjects((items) => items.map((item) => item.id === editProjectId ? {
+        ...item,
+        name: payload.project!.name,
+        address: payload.project!.address,
+        status: payload.project!.status,
+        archived: payload.project!.archived,
+      } : item));
+      setEditProjectId(null);
+      showToast(payload.project.status === "Baigtas" ? "Projektas pažymėtas kaip baigtas" : "Projektas atnaujintas");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Projekto atnaujinti nepavyko");
+    } finally {
+      setEditProjectSaving(false);
+    }
+  }
+
+  async function deleteProjectById(projectIdToDelete: string) {
+    const target = projects.find((project) => project.id === projectIdToDelete);
+    if (!window.confirm(`Ištrinti projektą „${target?.name ?? ""}“ ir visus jo įrašus? Šio veiksmo atšaukti negalima.`)) return;
+    setEditProjectSaving(true);
+    try {
+      const response = await fetch(`/api/projects?id=${encodeURIComponent(projectIdToDelete)}`, { method: "DELETE" });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Projekto ištrinti nepavyko");
+      setProjects((items) => items.filter((item) => item.id !== projectIdToDelete));
+      setDefects((items) => items.filter((item) => item.projectId !== projectIdToDelete));
+      if (editProjectId === projectIdToDelete) setEditProjectId(null);
+      const next = projects.find((project) => project.id !== projectIdToDelete && !isProjectCompleted(project)) ?? projects.find((project) => project.id !== projectIdToDelete);
+      if (next) selectProject(next.id, false);
+      else {
+        projectIdRef.current = "";
+        setProjectId("");
+        window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+      }
+      showToast("Projektas ištrintas");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Projekto ištrinti nepavyko");
+    } finally {
+      setEditProjectSaving(false);
+    }
+  }
+
+  async function deleteEditedProject() {
+    if (!editProjectId) return;
+    await deleteProjectById(editProjectId);
   }
 
   async function downloadCsv() {
@@ -1282,10 +1376,10 @@ export default function Home({ initialData = null }: HomeProps) {
             ) : (
               <p className="project-choice-empty">Objektas nepriskirtas</p>
             )
-          ) : projects.map((project) => (
+          ) : sidebarProjects.map((project) => (
             <button key={project.id} className={project.id === resolvedProjectId ? "project-active" : ""} onClick={() => selectProject(project.id)}>
               <span className="project-dot" />
-              <span><strong>{project.name}</strong><small>{project.address || "Informaciją papildysite vėliau"}</small></span>
+              <span><strong>{project.name}</strong><small>{isProjectCompleted(project) ? "Baigtas" : project.address || "Informaciją papildysite vėliau"}</small></span>
               <em>{defects.filter((item) => item.projectId === project.id && !isRecordArchived(item)).length}</em>
             </button>
           ))}
@@ -1312,8 +1406,16 @@ export default function Home({ initialData = null }: HomeProps) {
           <section className="project-heading">
             <div>
               <div className="eyebrow"><span className="live-dot" /> {isClient ? "Fiksuojate objekte" : "Aktyvus projektas"}</div>
-              <div className="title-row"><h1>{activeProject.name}</h1></div>
-              <p>{activeProject.address || (isClient ? "Čia fiksuojate brokus, apimtis ir papildomas apimtis." : "Projekto informaciją galėsite papildyti vėliau")}</p>
+              <div className="title-row">
+                <h1>{activeProject.name}</h1>
+                {isStaff && activeProject.id ? (
+                  <button type="button" onClick={() => openEditProject(activeProject)} aria-label="Redaguoti projektą">✎</button>
+                ) : null}
+              </div>
+              <p>
+                {projectCompleted ? "Baigtas projektas · " : ""}
+                {activeProject.address || (isClient ? "Čia fiksuojate brokus, apimtis ir papildomas apimtis." : "Projekto informaciją galėsite papildyti vėliau")}
+              </p>
             </div>
             {isStaff && (
               <button type="button" className="mobile-client-link" onClick={() => void openInviteModal()}>
@@ -1652,19 +1754,28 @@ export default function Home({ initialData = null }: HomeProps) {
               <button type="button" onClick={() => setProjectPickerOpen(false)} aria-label="Uždaryti">×</button>
             </div>
             <p>Pasirinktas projektas bus naudojamas visiems naujiems įrašams šiame telefone ar kompiuteryje, kol jį pakeisite.</p>
+            <label className="invite-toggle"><input type="checkbox" checked={showCompletedProjects} onChange={(event) => setShowCompletedProjects(event.target.checked)} /><span>Rodyti baigtus projektus</span></label>
             <label className="project-picker-search">
               <span>⌕</span>
               <input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Ieškoti projekto…" autoFocus />
             </label>
             <div className="project-choice-list">
               {filteredProjects.map((project) => (
-                <button type="button" key={project.id} className={project.id === resolvedProjectId ? "project-choice-active" : ""} onClick={() => selectProject(project.id)}>
-                  <span className="project-choice-dot" />
-                  <span><strong>{project.name}</strong><small>{project.address || "Informaciją papildysite vėliau"}</small></span>
-                  <em>{project.id === resolvedProjectId ? "Pasirinktas" : "Pasirinkti"}</em>
-                </button>
+                <div key={project.id} className={`project-choice-row ${profile.role === "staff" ? "project-choice-row-staff" : ""} ${project.id === resolvedProjectId ? "project-choice-active" : ""}`}>
+                  <button type="button" onClick={() => selectProject(project.id)}>
+                    <span className="project-choice-dot" />
+                    <span><strong>{project.name}</strong><small>{isProjectCompleted(project) ? "Baigtas" : project.address || "Informaciją papildysite vėliau"}</small></span>
+                    <em>{project.id === resolvedProjectId ? "Pasirinktas" : "Pasirinkti"}</em>
+                  </button>
+                  {profile.role === "staff" ? (
+                    <>
+                      <button type="button" className="project-choice-edit" onClick={() => openEditProject(project)} aria-label={`Redaguoti ${project.name}`}>✎</button>
+                      <button type="button" className="project-choice-delete" onClick={() => void deleteProjectById(project.id)} aria-label={`Ištrinti ${project.name}`} disabled={editProjectSaving}>🗑</button>
+                    </>
+                  ) : null}
+                </div>
               ))}
-              {!filteredProjects.length && <div className="project-choice-empty">Pagal paiešką projektų nerasta.</div>}
+              {!filteredProjects.length && <div className="project-choice-empty">{showCompletedProjects ? "Pagal paiešką projektų nerasta." : "Nėra vykdomų projektų. Įjunkite „Rodyti baigtus“ arba sukurkite naują."}</div>}
             </div>
             {profile.role === "staff" && <button type="button" className="project-create-button" onClick={() => { setProjectPickerOpen(false); setNewProjectOpen(true); }}>＋ Sukurti naują projektą</button>}
           </section>
@@ -1679,6 +1790,28 @@ export default function Home({ initialData = null }: HomeProps) {
             <p>Dabar pakanka projekto pavadinimo. Adresą, kontaktinį asmenį ir kitą informaciją galėsite papildyti vėliau projekto viduje.</p>
             <label><span>Projekto pavadinimas *</span><input name="name" required placeholder="Pvz., Vytenio g. 15" autoFocus /></label>
             <div className="panel-actions"><button type="button" className="secondary-button" onClick={() => setNewProjectOpen(false)}>Atšaukti</button><button type="submit" className="primary-button">Sukurti ir pasirinkti</button></div>
+          </form>
+        </div>
+      )}
+
+      {editProjectId && profile.role === "staff" && (
+        <div className="modal-layer project-modal-layer" role="dialog" aria-modal="true" aria-labelledby="edit-project-title">
+          <button className="modal-scrim" onClick={() => !editProjectSaving && setEditProjectId(null)} aria-label="Uždaryti" />
+          <form className="project-modal" onSubmit={saveEditedProject}>
+            <div className="panel-title"><div><span>Objektas</span><h2 id="edit-project-title">Redaguoti projektą</h2></div><button type="button" onClick={() => setEditProjectId(null)} aria-label="Uždaryti" disabled={editProjectSaving}>×</button></div>
+            <p>Pataisykite pavadinimą ar adresą. Baigtus objektus paslėpsime nuo aktyvaus sąrašo, bet galėsite juos rasti per „Rodyti baigtus“.</p>
+            <label><span>Projekto pavadinimas *</span><input value={editProjectName} onChange={(event) => setEditProjectName(event.target.value)} required placeholder="Pvz., BURGA" autoFocus /></label>
+            <label><span>Adresas</span><input value={editProjectAddress} onChange={(event) => setEditProjectAddress(event.target.value)} placeholder="Pvz., Kauno LEZ" /></label>
+            <label><span>Būsena</span>
+              <select value={editProjectStatus} onChange={(event) => setEditProjectStatus(event.target.value as ProjectStatus)}>
+                {projectStatuses.map((status) => <option key={status}>{status}</option>)}
+              </select>
+            </label>
+            <div className="panel-actions project-edit-actions">
+              <button type="button" className="danger-button" onClick={() => void deleteEditedProject()} disabled={editProjectSaving}>Ištrinti</button>
+              <button type="button" className="secondary-button" onClick={() => setEditProjectId(null)} disabled={editProjectSaving}>Atšaukti</button>
+              <button type="submit" className="primary-button" disabled={editProjectSaving || !editProjectName.trim()}>{editProjectSaving ? "Saugoma…" : "Išsaugoti"}</button>
+            </div>
           </form>
         </div>
       )}

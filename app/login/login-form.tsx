@@ -1,7 +1,6 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { SEED_STAFF_EMAIL, SEED_STAFF_PASSWORD } from "@/lib/seed-login";
 
 export default function LoginForm({ invite, join }: { invite: string; join: string }) {
   const guestFlow = Boolean(invite || join);
@@ -69,18 +68,6 @@ export default function LoginForm({ invite, join }: { invite: string; join: stri
         </button>
         {message ? <p className="login-error">{message}</p> : null}
       </form>
-      {!guestFlow ? (
-        <button
-          type="button"
-          className="login-staff-fill"
-          onClick={() => {
-            setEmail(SEED_STAFF_EMAIL);
-            setPassword(SEED_STAFF_PASSWORD);
-          }}
-        >
-          Distyle testas: užpildyti {SEED_STAFF_EMAIL}
-        </button>
-      ) : null}
     </>
   );
 }

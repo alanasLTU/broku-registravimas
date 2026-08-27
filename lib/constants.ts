@@ -43,3 +43,16 @@ export function normalizeStatus(value: string | null | undefined): (typeof statu
 }
 export const ACTIVE_PROJECT_STORAGE_KEY = "broku-registras:active-project-id";
 export const ACTIVE_TYPE_STORAGE_KEY = "broku-registras:active-record-type";
+
+export const projectStatuses = ["Vykdomas", "Baigtas"] as const;
+export type ProjectStatus = (typeof projectStatuses)[number];
+export const ACTIVE_PROJECT_STATUS = "Vykdomas" as const;
+export const COMPLETED_PROJECT_STATUS = "Baigtas" as const;
+
+export function normalizeProjectStatus(value: string | null | undefined): ProjectStatus {
+  return value === COMPLETED_PROJECT_STATUS ? COMPLETED_PROJECT_STATUS : ACTIVE_PROJECT_STATUS;
+}
+
+export function isProjectCompleted(project: { status?: string | null; archived?: boolean }) {
+  return Boolean(project.archived) || project.status === COMPLETED_PROJECT_STATUS;
+}

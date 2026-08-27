@@ -1,5 +1,6 @@
 import { apiError, requireUser } from "@/lib/auth";
 import { isClientRecordType, isRecordType, recordPrefixes, responsibilities, priorities } from "@/lib/constants";
+import { asUuid } from "@/lib/ids";
 import { mapRecord } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
@@ -30,7 +31,7 @@ export async function POST(request: Request) {
       : (isRecordType(requestedType) ? requestedType : "Brokas");
     const issues = (Array.isArray(payload.issues) ? payload.issues as IssuePayload[] : [])
       .map((item) => ({
-        id: item.id?.trim() && !item.id.startsWith("legacy-") ? item.id : crypto.randomUUID(),
+        id: asUuid(item.id),
         issue: item.issue?.trim().slice(0, 2000) || "",
         requiredWork: item.requiredWork?.trim().slice(0, 2000) || "",
       }))
