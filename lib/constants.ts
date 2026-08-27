@@ -6,6 +6,16 @@ export const MEDIA_BUCKET = "record-media";
 
 export const recordTypes = ["Brokas", "Apimtis", "Papildoma apimtis", "Užduotis"] as const;
 export const clientRecordTypes = ["Brokas", "Apimtis", "Papildoma apimtis"] as const;
+export type RecordTypeName = (typeof recordTypes)[number];
+export type ClientRecordTypeName = (typeof clientRecordTypes)[number];
+
+export function isRecordType(value: string): value is RecordTypeName {
+  return (recordTypes as readonly string[]).includes(value);
+}
+
+export function isClientRecordType(value: string): value is ClientRecordTypeName {
+  return (clientRecordTypes as readonly string[]).includes(value);
+}
 export const statuses = ["Naujas", "Planuojamas", "Vykdoma", "Baigtas"] as const;
 export const COMPLETED_STATUS = "Baigtas" as const;
 export const LEGACY_COMPLETED_STATUSES = ["Baigtas", "Uždaryta"] as const;

@@ -1,5 +1,5 @@
 import { apiError, requireUser } from "@/lib/auth";
-import { clientRecordTypes, recordPrefixes, recordTypes, responsibilities, priorities } from "@/lib/constants";
+import { isClientRecordType, isRecordType, recordPrefixes, responsibilities, priorities } from "@/lib/constants";
 import { mapRecord } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
@@ -22,11 +22,12 @@ export async function POST(request: Request) {
     const room = String(payload.room ?? "").trim();
     const zone = String(payload.zone ?? "").trim();
     const requestedType = String(payload.recordType ?? "Brokas");
-    const allowedTypes = profile.role === "client" ? clientRecordTypes : recordTypes;
     if (profile.role === "client" && requestedType === "Užduotis") {
       return Response.json({ error: "Klientai negali kurti užduočių." }, { status: 403 });
     }
-    const recordType = allowedTypes.includes(requestedType as typeof allowedTypes[number]) ? requestedType : "Brokas";
+    const recordType = profile.role === "client"
+      ? (isClientRecordType(requestedType) ? requestedType : "Brokas")
+      : (isRecordType(requestedType) ? requestedType : "Brokas");
     const issues = (Array.isArray(payload.issues) ? payload.issues as IssuePayload[] : [])
       .map((item) => ({
         id: item.id?.trim() && !item.id.startsWith("legacy-") ? item.id : crypto.randomUUID(),
