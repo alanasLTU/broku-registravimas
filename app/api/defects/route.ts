@@ -1,7 +1,7 @@
-import { apiError, requireUser } from "@/lib/auth";
+import { apiError, requirePermission, requireUser } from "@/lib/auth";
 import { isClientRecordType, isRecordType, recordPrefixes, responsibilities, priorities } from "@/lib/constants";
 import { asUuid } from "@/lib/ids";
-import { mapRecord } from "@/lib/map-record";
+import { fetchRecordBundle } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
 
@@ -17,11 +17,13 @@ function parsePrice(value: unknown) {
 export async function POST(request: Request) {
   try {
     const { supabase, profile } = await requireUser();
+    requirePermission(profile, "create_records");
     const payload = await request.json() as Record<string, unknown>;
     const projectId = String(payload.projectId ?? "").trim();
     const title = String(payload.title ?? "").trim();
     const room = String(payload.room ?? "").trim();
     const zone = String(payload.zone ?? "").trim();
+    const parentRecordId = typeof payload.parentRecordId === "string" ? asUuid(payload.parentRecordId) : null;
     const requestedType = String(payload.recordType ?? "Brokas");
     if (profile.role === "client" && requestedType === "Užduotis") {
       return Response.json({ error: "Klientai negali kurti užduočių." }, { status: 403 });
@@ -38,8 +40,21 @@ export async function POST(request: Request) {
       .filter((item) => item.issue)
       .slice(0, 20);
 
-    if (!projectId || !title || !room || !zone) {
-      return Response.json({ error: "Projektas, pavadinimas, patalpa ir zona yra privalomi." }, { status: 400 });
+    if (!projectId || !title) {
+      return Response.json({ error: "Projektas ir pavadinimas yra privalomi." }, { status: 400 });
+    }
+
+    let resolvedRoom = room;
+    if (parentRecordId) {
+      const { data: parent } = await supabase.from("records").select("id, project_id, room, zone").eq("id", parentRecordId).maybeSingle();
+      if (!parent) return Response.json({ error: "Susijęs įrašas nerastas." }, { status: 404 });
+      if (parent.project_id !== projectId) {
+        return Response.json({ error: "Užduotis turi būti tame pačiame projekte." }, { status: 400 });
+      }
+      if (!resolvedRoom) resolvedRoom = parent.room || parent.zone || "—";
+    }
+    if (!resolvedRoom) {
+      return Response.json({ error: "Patalpa yra privaloma." }, { status: 400 });
     }
 
     const { data: code, error: codeError } = await supabase.rpc("next_record_code", {
@@ -56,16 +71,19 @@ export async function POST(request: Request) {
       id,
       code,
       project_id: projectId,
+      parent_record_id: parentRecordId,
       record_type: recordType,
       title,
-      room,
+      room: resolvedRoom,
       zone,
       description,
-      origin: profile.role,
+      origin: profile.role === "client" ? "client" : "staff",
       priority: priorities.includes(String(payload.priority) as typeof priorities[number]) ? String(payload.priority) : "Vidutinis",
-      status: "Naujas",
+      status: "Užregistruota",
       responsible: responsibilities.includes(requestedResponsible as typeof responsibilities[number]) ? requestedResponsible : "Montuotojai",
       assignee: String(payload.assignee ?? "").trim().slice(0, 120),
+      executor: String(payload.executor ?? "").trim().slice(0, 120),
+      supervisor_id: typeof payload.supervisorId === "string" && payload.supervisorId ? asUuid(payload.supervisorId) : null,
       due_date: (() => {
         const value = String(payload.due ?? "").trim();
         return !value || value === "Nenustatyta" ? null : value;
@@ -74,6 +92,8 @@ export async function POST(request: Request) {
       price_cents: parsePrice(payload.price),
       notes: String(payload.notes ?? "").trim().slice(0, 4000),
       required_work: requiredWork,
+      visible_to_client: Boolean(payload.visibleToClient),
+      notify_responsible: Boolean(payload.notifyResponsible),
       created_by: profile.id,
       created_by_email: profile.email,
       created_by_name: profile.displayName,
@@ -105,13 +125,7 @@ export async function POST(request: Request) {
       if (eventError) console.error("record_events insert:", eventError);
     });
 
-    const mapped = await mapRecord(supabase, record, issues.map((item) => ({
-      id: item.id,
-      record_id: id,
-      issue: item.issue,
-      required_work: item.requiredWork,
-    })), []);
-
+    const mapped = await fetchRecordBundle(supabase, id);
     return Response.json({ defect: mapped }, { status: 201 });
   } catch (error) {
     return apiError(error);

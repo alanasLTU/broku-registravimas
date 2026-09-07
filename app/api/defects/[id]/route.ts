@@ -1,7 +1,7 @@
-import { apiError, requireUser } from "@/lib/auth";
-import { COMPLETED_STATUS, isClientRecordType, isRecordType, normalizeStatus, priorities, responsibilities, statuses } from "@/lib/constants";
+import { apiError, requirePermission, requireUser } from "@/lib/auth";
+import { COMPLETED_STATUS, isClientRecordType, isRecordType, MEDIA_BUCKET, normalizeStatus, priorities, responsibilities, statuses } from "@/lib/constants";
 import { asUuid } from "@/lib/ids";
-import { mapRecord, type RecordRow } from "@/lib/map-record";
+import { fetchRecordBundle } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +9,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   try {
     const { id } = await context.params;
     const { supabase, profile } = await requireUser();
+    requirePermission(profile, "edit_records");
     const payload = await request.json() as Record<string, unknown>;
 
     const { data: before, error: beforeError } = await supabase.from("records").select("*").eq("id", id).maybeSingle();
@@ -40,6 +41,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       }
       updates.record_type = payload.recordType;
     }
+    if (typeof payload.projectId === "string" && payload.projectId.trim()) {
+      updates.project_id = payload.projectId.trim();
+    }
     if (typeof payload.title === "string" && payload.title.trim()) updates.title = payload.title.trim().slice(0, 300);
     if (typeof payload.room === "string") updates.room = payload.room.trim().slice(0, 120);
     if (typeof payload.zone === "string") updates.zone = payload.zone.trim().slice(0, 120);
@@ -49,14 +53,14 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       if (responsibilities.includes(party as typeof responsibilities[number])) updates.responsible = party;
     }
     if (typeof payload.assignee === "string") updates.assignee = payload.assignee.trim().slice(0, 120);
+    if (typeof payload.executor === "string") updates.executor = payload.executor.trim().slice(0, 120);
+    if (typeof payload.supervisorId === "string") {
+      updates.supervisor_id = payload.supervisorId.trim() ? asUuid(payload.supervisorId) : null;
+    }
     if (typeof payload.due === "string") updates.due_date = payload.due && payload.due !== "Nenustatyta" ? payload.due : null;
     if (typeof payload.archived === "boolean") {
       updates.archived = payload.archived;
       updates.archived_at = payload.archived ? new Date().toISOString() : null;
-      if (payload.archived) {
-        updates.status = COMPLETED_STATUS;
-        updates.resolved_at = new Date().toISOString();
-      }
     }
     if (typeof payload.status === "string") {
       const nextStatus = normalizeStatus(payload.status);
@@ -64,10 +68,6 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
         updates.status = nextStatus;
         const completed = nextStatus === COMPLETED_STATUS;
         if (completed) updates.resolved_at = new Date().toISOString();
-        if (completed && typeof payload.archived !== "boolean") {
-          updates.archived = true;
-          updates.archived_at = new Date().toISOString();
-        }
       }
     }
     if (typeof payload.resolution === "string") updates.resolution = payload.resolution.trim().slice(0, 4000);
@@ -78,8 +78,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       updates.price_cents = String(payload.price).trim() && Number.isFinite(value) && value >= 0 ? Math.round(value * 100) : null;
     }
     if (typeof payload.selected === "boolean") updates.include_in_report = payload.selected;
+    if (typeof payload.visibleToClient === "boolean") updates.visible_to_client = payload.visibleToClient;
+    if (typeof payload.notifyResponsible === "boolean") updates.notify_responsible = payload.notifyResponsible;
 
-    const { data: after, error } = await supabase.from("records").update(updates).eq("id", id).select("*").single();
+    const { error } = await supabase.from("records").update(updates).eq("id", id).select("*").single();
     if (error) throw error;
 
     if (itemsProvided) {
@@ -99,7 +101,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (updates.status && updates.status !== before.status) changes.push(`Būsena pakeista į „${updates.status}“`);
     if (updates.archived === true && !before.archived) changes.push("Įrašas archyvuotas");
     if (updates.archived === false && before.archived) changes.push("Įrašas grąžintas į sąrašą");
-    if (updates.responsible && updates.responsible !== before.responsible) changes.push(`Atsakomybė priskirta: ${updates.responsible}`);
+    if (updates.responsible && updates.responsible !== before.responsible) changes.push(`Atsakomybė: ${updates.responsible}`);
     if (!changes.length) changes.push("Įrašas atnaujintas");
     try {
       await supabase.from("record_events").insert({
@@ -113,11 +115,32 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       console.error("record_events insert failed:", eventError);
     }
 
-    const [{ data: items }, { data: media }] = await Promise.all([
-      supabase.from("record_items").select("*").eq("record_id", id).order("sort_order"),
-      supabase.from("record_media").select("*").eq("record_id", id).order("sort_order"),
-    ]);
-    return Response.json({ defect: await mapRecord(supabase, after as RecordRow, items ?? [], media ?? []) });
+    const defect = await fetchRecordBundle(supabase, id);
+    return Response.json({ defect });
+  } catch (error) {
+    return apiError(error);
+  }
+}
+
+export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await context.params;
+    const { supabase, profile } = await requireUser();
+    requirePermission(profile, "delete_records");
+
+    const { data: record } = await supabase.from("records").select("id, project_id").eq("id", id).maybeSingle();
+    if (!record) return Response.json({ error: "Įrašas nerastas." }, { status: 404 });
+
+    const { data: media } = await supabase.from("record_media").select("object_key").eq("record_id", id);
+    const keys = (media ?? []).map((row) => row.object_key).filter(Boolean);
+    if (keys.length) {
+      await supabase.storage.from(MEDIA_BUCKET).remove(keys);
+    }
+
+    const { error } = await supabase.from("records").delete().eq("id", id);
+    if (error) throw error;
+
+    return Response.json({ ok: true });
   } catch (error) {
     return apiError(error);
   }

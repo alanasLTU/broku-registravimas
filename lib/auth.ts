@@ -1,6 +1,8 @@
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { errorMessage } from "@/lib/errors";
+import { isSuperAdminEmail } from "@/lib/constants";
+import { hasPermission, type PermissionKey, type UserPermissions, type UserRole } from "@/lib/permissions";
 
 export { errorMessage };
 
@@ -17,6 +19,25 @@ export function apiError(error: unknown) {
   return Response.json({ error: message }, { status });
 }
 
+export type AppProfile = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  isSuperAdmin: boolean;
+  permissions: UserPermissions;
+};
+
+export function profileCan(profile: AppProfile, key: PermissionKey) {
+  return hasPermission(profile.role, profile.permissions, key, profile.isSuperAdmin);
+}
+
+export function requirePermission(profile: AppProfile, key: PermissionKey) {
+  if (!profileCan(profile, key)) {
+    throw new AppAccessError("Neturite teisės atlikti šį veiksmą.", 403);
+  }
+}
+
 export async function requireUser() {
   const supabase = await createServerSupabase();
   const {
@@ -29,15 +50,16 @@ export async function requireUser() {
 
   let { data: profile, error } = await client
     .from("profiles")
-    .select("id, email, display_name, role")
+    .select("id, email, display_name, role, is_super_admin, permissions")
     .eq("id", user.id)
     .maybeSingle();
   if (error) throw error;
 
   if (!profile) {
     const displayName = user.user_metadata?.full_name || user.email.split("@")[0];
-    const { count } = await client.from("profiles").select("id", { count: "exact", head: true }).eq("role", "staff");
-    const role = count ? "client" : "staff";
+    const { count } = await client.from("profiles").select("id", { count: "exact", head: true }).eq("role", "admin");
+    const isSeedAdmin = isSuperAdminEmail(user.email);
+    const role: UserRole = isSeedAdmin || !count ? "admin" : "client";
     const inserted = await client
       .from("profiles")
       .upsert({
@@ -45,35 +67,46 @@ export async function requireUser() {
         email: user.email,
         display_name: displayName,
         role,
+        is_super_admin: isSeedAdmin,
       })
-      .select("id, email, display_name, role")
+      .select("id, email, display_name, role, is_super_admin, permissions")
       .single();
     if (inserted.error) throw inserted.error;
     profile = inserted.data;
-  } else if (profile.role !== "staff") {
-    const { count } = await client.from("profiles").select("id", { count: "exact", head: true }).eq("role", "staff");
-    if (!count) {
-      const updated = await client
-        .from("profiles")
-        .update({ role: "staff" })
-        .eq("id", user.id)
-        .select("id, email, display_name, role")
-        .single();
-      if (!updated.error && updated.data) profile = updated.data;
-    }
+  } else if (isSuperAdminEmail(user.email) && profile.role !== "admin") {
+    const updated = await client
+      .from("profiles")
+      .update({ role: "admin", is_super_admin: true })
+      .eq("id", user.id)
+      .select("id, email, display_name, role, is_super_admin, permissions")
+      .single();
+    if (!updated.error && updated.data) profile = updated.data;
+  } else if (profile.is_super_admin && profile.role !== "admin" && profile.role !== "staff") {
+    const updated = await client
+      .from("profiles")
+      .update({ role: "admin" })
+      .eq("id", user.id)
+      .select("id, email, display_name, role, is_super_admin, permissions")
+      .single();
+    if (!updated.error && updated.data) profile = updated.data;
   }
 
   if (!profile) throw new AppAccessError("Nepavyko sukurti profilio. Patikrinkite SUPABASE_SERVICE_ROLE_KEY.", 401);
 
+  const appProfile: AppProfile = {
+    id: profile.id as string,
+    email: profile.email as string,
+    displayName: (profile.display_name as string) || user.email,
+    role: (profile.role as UserRole) || "client",
+    isSuperAdmin: Boolean(profile.is_super_admin),
+    permissions: (profile.permissions as UserPermissions) ?? {},
+  };
+
   return {
     supabase,
+    admin,
     user,
-    profile: {
-      id: profile.id as string,
-      email: profile.email as string,
-      displayName: (profile.display_name as string) || user.email,
-      role: profile.role as "staff" | "client",
-    },
+    profile: appProfile,
   };
 }
 

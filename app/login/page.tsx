@@ -18,9 +18,9 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         ) : (
           <>
             {guestFlow ? (
-              <p>Pirmas kartas šiame objekte: įveskite <b>savo el. paštą</b> ir slaptažodį (bent 6 simboliai). Jei paskyros dar nėra — ji bus sukurta. Kitą kartą jungkitės tuo pačiu acc be nuorodos.</p>
+              <p>Pirmas kartas: įveskite <b>savo el. paštą</b> ir slaptažodį (bent 6 simboliai). Jei paskyros dar nėra — ji bus sukurta iš karto, be el. pašto patvirtinimo. Kitą kartą jungkitės tuo pačiu acc.</p>
             ) : (
-              <p>Prisijunkite savo el. paštu ir slaptažodžiu. Klientai mato tik savo objektą. Distyle komanda — visą registrą.</p>
+              <p>Prisijunkite el. paštu ir slaptažodžiu. Nauji klientai / komanda: Argintas sukuria paskyrą arba atsiunčia objekto nuorodą — registracija vyksta be laiškų.</p>
             )}
             {params.error ? <p className="login-error">{params.error}</p> : null}
             <LoginForm invite={params.invite ?? ""} join={params.join ?? ""} />

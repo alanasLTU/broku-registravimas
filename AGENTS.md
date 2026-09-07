@@ -62,7 +62,7 @@ Kol kas: el. paštas + slaptažodis per `POST /api/auth/direct-login`.
 
 Bendras Distyle testinis acc (keli žmonės / keli telefonai vienu metu):
 
-- El. paštas: `alanas@digroup.lt`
+- El. paštas: `argintas@digroup.lt` (super admin)
 - Slaptažodis: `Distyle`
 - Kodas: `lib/seed-login.ts`
 

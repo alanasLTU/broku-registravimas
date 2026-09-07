@@ -1,4 +1,4 @@
-import { apiError, requireUser } from "@/lib/auth";
+import { apiError, requirePermission, requireUser } from "@/lib/auth";
 import { resolvePublicOrigin } from "@/lib/public-origin";
 
 export const dynamic = "force-dynamic";
@@ -6,9 +6,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
     const { supabase, profile } = await requireUser();
-    if (profile.role !== "staff") {
-      return Response.json({ error: "Nuorodą gali kurti tik Distyle komanda." }, { status: 403 });
-    }
+    requirePermission(profile, "invite_clients");
 
     const payload = await request.json() as { projectId?: string; origin?: string };
     const projectId = payload.projectId?.trim() ?? "";

@@ -23,10 +23,12 @@ describe("record types", () => {
 });
 
 describe("record status", () => {
-  it("maps legacy statuses", () => {
-    assert.equal(normalizeStatus("Uždaryta"), "Baigtas");
-    assert.equal(normalizeStatus("Perduota"), "Planuojamas");
+  it("maps legacy statuses to new workflow", () => {
+    assert.equal(normalizeStatus("Naujas"), "Užregistruota");
+    assert.equal(normalizeStatus("Uždaryta"), "Sutvarkyta");
+    assert.equal(normalizeStatus("Perduota"), "Perduota sprendimui");
     assert.equal(normalizeStatus("Vykdoma"), "Vykdoma");
+    assert.equal(normalizeStatus("Užregistruota"), "Užregistruota");
   });
 });
 

@@ -1,4 +1,4 @@
-import { apiError, requireUser } from "@/lib/auth";
+import { apiError, requirePermission, requireUser } from "@/lib/auth";
 import { MEDIA_BUCKET } from "@/lib/constants";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +39,38 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
     const { data, error } = await supabase.storage.from(MEDIA_BUCKET).createSignedUrl(objectKey, 60 * 60 * 12);
     if (error) throw error;
     return Response.json({ url: `${data.signedUrl}${data.signedUrl.includes("?") ? "&" : "?"}v=${Date.now()}`, fileName: "pazymeta.jpg", objectKey });
+  } catch (error) {
+    return apiError(error);
+  }
+}
+
+export async function DELETE(_request: Request, context: { params: Promise<{ id: string; mediaId: string }> }) {
+  try {
+    const { id, mediaId } = await context.params;
+    const { supabase, profile } = await requireUser();
+    requirePermission(profile, "delete_media");
+
+    const { data: row } = await supabase
+      .from("record_media")
+      .select("object_key")
+      .eq("record_id", id)
+      .eq("id", mediaId)
+      .maybeSingle();
+    if (!row) return Response.json({ error: "Failas nerastas." }, { status: 404 });
+
+    await supabase.storage.from(MEDIA_BUCKET).remove([row.object_key]);
+    const { error } = await supabase.from("record_media").delete().eq("id", mediaId).eq("record_id", id);
+    if (error) throw error;
+
+    await supabase.from("record_events").insert({
+      record_id: id,
+      type: "media_removed",
+      message: "Pašalintas failas",
+      actor_email: profile.email,
+      actor_name: profile.displayName,
+    });
+
+    return Response.json({ ok: true });
   } catch (error) {
     return apiError(error);
   }

@@ -49,7 +49,11 @@ export async function updateSession(request: NextRequest) {
   if (user && path.startsWith("/login")) {
     const redirect = request.nextUrl.clone();
     redirect.pathname = "/";
+    const invite = request.nextUrl.searchParams.get("invite");
+    const join = request.nextUrl.searchParams.get("join");
     redirect.search = "";
+    if (join) redirect.searchParams.set("join", join);
+    else if (invite) redirect.searchParams.set("invite", invite);
     return NextResponse.redirect(redirect);
   }
 

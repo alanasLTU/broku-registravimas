@@ -6,8 +6,13 @@ import MediaViewer, { type MediaViewerItem } from "./components/media-viewer";
 import RecordThumb from "./components/record-thumb";
 import MediaFileButton from "./components/media-file-button";
 import ResponsiblePicker from "./components/responsible-picker";
-import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, clientRecordTypes, isProjectCompleted, isRecordArchived, normalizeProjectStatus, normalizeStatus, projectStatuses, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectStatus } from "@/lib/constants";
+import ProjectEdit from "./components/project-edit";
+import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, ARCHIVED_TAB, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, clientRecordTypes, isProjectCompleted, isRecordArchived, normalizeProjectStatus, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectStatus } from "@/lib/constants";
 import { buildResponsiblePayload, normalizeResponsibleParty, responsibleClassSlug, responsibleDisplay, responsibleOtherText, type ResponsibleParty } from "@/lib/responsible";
+import { DEFAULT_REPORT_OPTIONS, REPORT_OPTION_LABELS, buildReportFieldRows, type ReportOptions } from "@/lib/report-fields";
+import { preparePrintImages } from "@/lib/print-images";
+import type { PermissionKey } from "@/lib/permissions";
+import { isInternalRole } from "@/lib/permissions";
 import { copyText, shareOrCopyText } from "@/lib/copy-text";
 import { createBrowserSupabase } from "@/lib/supabase/client";
 import { errorMessage } from "@/lib/errors";
@@ -78,6 +83,7 @@ type Defect = {
   assignee: string;
   due: string;
   created: string;
+  createdAt?: string;
   photo?: string;
   photos?: DefectPhoto[];
   videos?: DefectVideo[];
@@ -90,19 +96,48 @@ type Defect = {
   notes?: string;
   archived?: boolean;
   version?: number;
+  executor?: string;
+  supervisorId?: string | null;
+  supervisorName?: string;
+  parentRecordId?: string | null;
+  visibleToClient?: boolean;
+  childTasks?: Array<{ id: string; code: string; title: string; status: string }>;
 };
 
-type Profile = { displayName: string; email: string; role: "staff" | "client" };
+type Profile = {
+  displayName: string;
+  email: string;
+  role: "admin" | "staff" | "contractor" | "client";
+  isSuperAdmin?: boolean;
+  permissions?: Partial<Record<PermissionKey, boolean>>;
+};
 
 type DetailMetaDraft = {
+  recordType: RecordType;
+  projectId: string;
+  title: string;
+  room: string;
+  zone: string;
   responsible: ResponsibleParty;
   assignee: string;
+  executor: string;
+  supervisorId: string;
   due: string;
   status: Status;
   requestedBy: string;
   price: string;
   notes: string;
   resolution: string;
+  visibleToClient: boolean;
+};
+
+type RecordEvent = {
+  id: string;
+  type: string;
+  message: string;
+  actor_name: string;
+  actor_email: string;
+  created_at: string;
 };
 
 function responsibleCell(defect: Defect) {
@@ -114,21 +149,34 @@ function responsibleCell(defect: Defect) {
 function metaDraftFromDefect(defect: Defect): DetailMetaDraft {
   const party = normalizeResponsibleParty(defect.responsible);
   return {
+    recordType: defect.recordType,
+    projectId: defect.projectId,
+    title: defect.title,
+    room: defect.room ?? "",
+    zone: defect.zone ?? "",
     responsible: party,
     assignee: responsibleOtherText(defect.responsible, defect.assignee),
+    executor: defect.executor ?? "",
+    supervisorId: defect.supervisorId ?? "",
     due: defect.due,
     status: defect.status,
     requestedBy: defect.requestedBy ?? "",
     price: defect.price ?? "",
     notes: defect.notes ?? "",
     resolution: defect.resolution ?? "",
+    visibleToClient: Boolean(defect.visibleToClient),
   };
+}
+
+function can(profile: Profile, key: PermissionKey) {
+  if (profile.isSuperAdmin || profile.role === "admin") return true;
+  return Boolean(profile.permissions?.[key]);
 }
 
 const initialProjects: Project[] = [];
 const initialDefects: Defect[] = [];
 
-const statusTabs: Array<Status | "Visi"> = ["Visi", ...statusList];
+const statusTabs: Array<Status | "Visi" | typeof ARCHIVED_TAB> = ["Visi", ...statusList, ARCHIVED_TAB];
 const recordTypes: RecordType[] = [...recordTypeList];
 const clientCaptureTypes: RecordType[] = [...clientRecordTypes];
 
@@ -204,6 +252,7 @@ function normalizeDefects(items: Defect[]) {
     status: normalizeStatus(item.status),
     priority: item.priority as Priority,
     created: formatCreated(item.created),
+    createdAt: item.createdAt ?? item.created,
   }));
 }
 
@@ -291,7 +340,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const [inviteLink, setInviteLink] = useState("");
   const [shareLink, setShareLink] = useState("");
   const [shareLinkLoading, setShareLinkLoading] = useState(false);
-  const [activeStatus, setActiveStatus] = useState<Status | "Visi">("Visi");
+  const [activeStatus, setActiveStatus] = useState<Status | "Visi" | typeof ARCHIVED_TAB>("Visi");
   const [search, setSearch] = useState("");
   const [captureOpen, setCaptureOpen] = useState(false);
   const [captureStep, setCaptureStep] = useState<"type" | "form">("type");
@@ -324,7 +373,18 @@ export default function Home({ initialData = null }: HomeProps) {
   const [priorityFilter, setPriorityFilter] = useState("Visi");
   const [typeFilter, setTypeFilter] = useState<RecordType | "Visi">("Visi");
   const [originFilter, setOriginFilter] = useState<"Visi" | "Distyle" | "Klientas">("Visi");
-  const [reportOptions, setReportOptions] = useState({ photos: true, descriptions: true, responsibility: true, commercial: true });
+  const [roomFilter, setRoomFilter] = useState("");
+  const [titleFilter, setTitleFilter] = useState("");
+  const [executorFilter, setExecutorFilter] = useState("Visi");
+  const [createdByFilter, setCreatedByFilter] = useState("Visi");
+  const [dueFromFilter, setDueFromFilter] = useState("");
+  const [dueToFilter, setDueToFilter] = useState("");
+  const [createdFromFilter, setCreatedFromFilter] = useState("");
+  const [createdToFilter, setCreatedToFilter] = useState("");
+  const [reportOptions, setReportOptions] = useState<ReportOptions>({ ...DEFAULT_REPORT_OPTIONS });
+  const [recordEvents, setRecordEvents] = useState<RecordEvent[]>([]);
+  const [staffUsers, setStaffUsers] = useState<Array<{ id: string; display_name: string }>>([]);
+  const [printImageUrls, setPrintImageUrls] = useState<Record<string, string[]>>({});
   const [connection, setConnection] = useState<"loading" | "synced" | "demo">(() => (initialData ? "synced" : "loading"));
   const [toast, setToast] = useState("");
   const [photoEditorTarget, setPhotoEditorTarget] = useState<PhotoEditorTarget | null>(null);
@@ -334,6 +394,12 @@ export default function Home({ initialData = null }: HomeProps) {
   const [completePhoto, setCompletePhoto] = useState<File | null>(null);
   const [completePhotoPreview, setCompletePhotoPreview] = useState<string | null>(null);
   const [completeSaving, setCompleteSaving] = useState(false);
+  const [linkedTaskOpen, setLinkedTaskOpen] = useState(false);
+  const [linkedTaskTitle, setLinkedTaskTitle] = useState("");
+  const [linkedTaskSaving, setLinkedTaskSaving] = useState(false);
+  const [childTaskDrafts, setChildTaskDrafts] = useState<Record<string, { title: string; status: Status }>>({});
+  const [childTaskSavingId, setChildTaskSavingId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [detailMetaDraft, setDetailMetaDraft] = useState<DetailMetaDraft | null>(null);
   const [detailMetaSaving, setDetailMetaSaving] = useState(false);
   const [captureResponsible, setCaptureResponsible] = useState<ResponsibleParty>("Montuotojai");
@@ -356,6 +422,20 @@ export default function Home({ initialData = null }: HomeProps) {
       return payload;
     }
 
+    function applyPayload(data: { projects: Project[]; defects: Defect[]; user: Profile }, joinedProjectId = "") {
+      setProjects(data.projects);
+      setDefects(normalizeDefects(data.defects));
+      setProfile(data.user);
+      const nextProjectId = [joinedProjectId, projectIdRef.current, data.projects[0]?.id]
+        .find((id) => id && data.projects.some((project) => project.id === id)) ?? "";
+      if (nextProjectId) {
+        projectIdRef.current = nextProjectId;
+        setProjectId(nextProjectId);
+        window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextProjectId);
+      }
+      return nextProjectId;
+    }
+
     (async () => {
       try {
         let joinedProjectId = "";
@@ -372,25 +452,37 @@ export default function Home({ initialData = null }: HomeProps) {
             joinedProjectId = joinPayload.projectId;
           }
         } else if (invite) {
-          await fetch("/api/invites/accept", {
+          const inviteResponse = await fetch("/api/invites/accept", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ token: invite }),
           });
+          const invitePayload = await inviteResponse.json() as { projectId?: string; error?: string };
+          if (!inviteResponse.ok || !invitePayload.projectId) {
+            if (active) setToast(invitePayload.error || "Nepavyko priimti kvietimo");
+          } else {
+            joinedProjectId = invitePayload.projectId;
+          }
         }
 
-        const data = await loadRegister();
+        const needsRefresh = Boolean(join || invite) || !initialData?.user || !initialData.projects || !initialData.defects;
+        const data = needsRefresh
+          ? await loadRegister()
+          : {
+              user: initialData.user,
+              projects: initialData.projects,
+              defects: initialData.defects,
+            };
+
         if (!active || !data.user || !data.projects || !data.defects) return;
-        setProjects(data.projects);
-        setDefects(normalizeDefects(data.defects));
-        setProfile(data.user);
-        const nextProjectId = [joinedProjectId, projectIdRef.current, data.projects[0]?.id]
-          .find((id) => id && data.projects!.some((project) => project.id === id)) ?? "";
-        if (nextProjectId) {
-          projectIdRef.current = nextProjectId;
-          setProjectId(nextProjectId);
-          window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextProjectId);
-        }
+        applyPayload(
+          {
+            user: data.user,
+            projects: data.projects,
+            defects: normalizeDefects(data.defects as Defect[]),
+          },
+          joinedProjectId,
+        );
         if (joinedProjectId) {
           const name = data.projects.find((project) => project.id === joinedProjectId)?.name ?? "objektas";
           setToast(`Prisijungta prie objekto: ${name}`);
@@ -403,16 +495,29 @@ export default function Home({ initialData = null }: HomeProps) {
     })();
 
     return () => { active = false; };
-  }, []);
+  }, [initialData]);
 
   useEffect(() => {
     if (!detailId) {
       setDetailMetaDraft(null);
+      setRecordEvents([]);
       return;
     }
     const current = defects.find((item) => item.id === detailId);
     if (current) setDetailMetaDraft(metaDraftFromDefect(current));
-  }, [detailId]);
+    void fetch(`/api/defects/${detailId}/events`)
+      .then((response) => response.json())
+      .then((payload: { events?: RecordEvent[] }) => setRecordEvents(payload.events ?? []))
+      .catch(() => setRecordEvents([]));
+  }, [detailId, defects]);
+
+  useEffect(() => {
+    if (!isInternalRole(profile.role, profile.isSuperAdmin)) return;
+    void fetch("/api/staff")
+      .then((response) => response.json())
+      .then((payload: { users?: Array<{ id: string; display_name: string }> }) => setStaffUsers(payload.users ?? []))
+      .catch(() => setStaffUsers([]));
+  }, [profile.role]);
 
   useEffect(() => {
     const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen || Boolean(editProjectId);
@@ -429,6 +534,10 @@ export default function Home({ initialData = null }: HomeProps) {
     const frame = window.requestAnimationFrame(() => {
       setMediaViewerIndex(null);
       setShowDetailNote(false);
+      setLinkedTaskOpen(false);
+      setLinkedTaskTitle("");
+      setHistoryOpen(false);
+      setChildTaskDrafts({});
     });
     return () => window.cancelAnimationFrame(frame);
   }, [detailId]);
@@ -450,8 +559,8 @@ export default function Home({ initialData = null }: HomeProps) {
   }
 
   const resolvedProjectId = projectId || projects[0]?.id || "";
-  const isClient = profile.role === "client";
-  const isStaff = profile.role === "staff";
+  const isStaff = isInternalRole(profile.role, profile.isSuperAdmin);
+  const isClient = profile.role === "client" && !profile.isSuperAdmin;
   const captureTypes = isClient ? clientCaptureTypes : recordTypes;
   const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: isClient ? "Objektas nepriskirtas" : "Nėra projekto", address: "", open: 0, overdue: 0, status: "Vykdomas" as ProjectStatus, archived: false, clientsSeeStaffRecords: false };
   const projectCompleted = isProjectCompleted(activeProject);
@@ -479,22 +588,49 @@ export default function Home({ initialData = null }: HomeProps) {
     const term = search.trim().toLocaleLowerCase("lt");
     return defects.filter((defect) => {
       const inProject = defect.projectId === resolvedProjectId;
+      const isChildTask = Boolean(defect.parentRecordId);
       const archived = isRecordArchived(defect);
-      const inStatus = activeStatus === COMPLETED_STATUS
+      const inStatus = activeStatus === ARCHIVED_TAB
         ? archived
         : !archived && (activeStatus === "Visi" || defect.status === activeStatus);
-      const inSearch = !term || `${defect.code} ${defect.recordType} ${defect.title} ${placeLabel(defect)} ${defect.responsible} ${defect.requestedBy ?? ""} ${defect.notes ?? ""}`.toLocaleLowerCase("lt").includes(term);
+      const inSearch = !term || `${defect.code} ${defect.recordType} ${defect.title} ${placeLabel(defect)} ${defect.responsible} ${defect.executor ?? ""} ${defect.requestedBy ?? ""} ${defect.notes ?? ""} ${defect.createdByName ?? ""}`.toLocaleLowerCase("lt").includes(term);
       const inResponsible = responsibleFilter === "Visi" || normalizeResponsibleParty(defect.responsible) === responsibleFilter;
       const inPriority = priorityFilter === "Visi" || defect.priority === priorityFilter;
       const inType = typeFilter === "Visi" || defect.recordType === typeFilter;
       const inOrigin = originFilter === "Visi"
         || (originFilter === "Klientas" ? isClientOrigin(defect) : !isClientOrigin(defect));
+      const inRoom = !roomFilter.trim() || `${defect.room ?? ""} ${defect.zone ?? ""}`.toLocaleLowerCase("lt").includes(roomFilter.trim().toLocaleLowerCase("lt"));
+      const inTitle = !titleFilter.trim() || defect.title.toLocaleLowerCase("lt").includes(titleFilter.trim().toLocaleLowerCase("lt"));
+      const inExecutor = executorFilter === "Visi" || (defect.executor ?? "").toLocaleLowerCase("lt").includes(executorFilter.toLocaleLowerCase("lt"));
+      const inCreatedBy = createdByFilter === "Visi"
+        || `${defect.createdByName ?? ""} ${defect.createdByEmail ?? ""}`.toLocaleLowerCase("lt").includes(createdByFilter.toLocaleLowerCase("lt"));
+      const inDueFrom = !dueFromFilter || (defect.due !== "Nenustatyta" && defect.due >= dueFromFilter);
+      const inDueTo = !dueToFilter || (defect.due !== "Nenustatyta" && defect.due <= dueToFilter);
+      const createdDate = (defect.createdAt ?? defect.created).includes("T") ? (defect.createdAt ?? defect.created).slice(0, 10) : "";
+      const inCreatedFrom = !createdFromFilter || (createdDate && createdDate >= createdFromFilter);
+      const inCreatedTo = !createdToFilter || (createdDate && createdDate <= createdToFilter);
       const clientAllowed = !isClient || defect.recordType !== "Užduotis";
-      return inProject && inStatus && inSearch && inResponsible && inPriority && inType && inOrigin && clientAllowed;
+      return inProject && !isChildTask && inStatus && inSearch && inResponsible && inPriority && inType && inOrigin
+        && inRoom && inTitle && inExecutor && inCreatedBy && inDueFrom && inDueTo && inCreatedFrom && inCreatedTo && clientAllowed;
     });
-  }, [activeStatus, defects, isClient, originFilter, priorityFilter, resolvedProjectId, responsibleFilter, search, typeFilter]);
+  }, [activeStatus, createdByFilter, createdFromFilter, createdToFilter, defects, dueFromFilter, dueToFilter, executorFilter, isClient, originFilter, priorityFilter, resolvedProjectId, responsibleFilter, roomFilter, search, titleFilter, typeFilter]);
 
   const detail = defects.find((defect) => defect.id === detailId) ?? null;
+
+  useEffect(() => {
+    if (!detailId) {
+      setChildTaskDrafts({});
+      return;
+    }
+    const current = defects.find((item) => item.id === detailId);
+    if (!current?.childTasks?.length) {
+      setChildTaskDrafts({});
+      return;
+    }
+    setChildTaskDrafts(Object.fromEntries(
+      current.childTasks.map((task) => [task.id, { title: task.title, status: normalizeStatus(task.status) }]),
+    ));
+  }, [detailId, defects]);
   const detailMetaDirty = useMemo(() => {
     if (!detail || !detailMetaDraft) return false;
     return JSON.stringify(metaDraftFromDefect(detail)) !== JSON.stringify(detailMetaDraft);
@@ -520,9 +656,13 @@ export default function Home({ initialData = null }: HomeProps) {
       activeStatus !== "Visi" ? activeStatus : null,
       responsibleFilter !== "Visi" ? responsibleFilter : null,
       priorityFilter !== "Visi" ? priorityFilter : null,
+      roomFilter.trim() ? `Patalpa: ${roomFilter}` : null,
+      titleFilter.trim() ? `Pozicija: ${titleFilter}` : null,
+      executorFilter !== "Visi" ? `Vykdytojas: ${executorFilter}` : null,
+      createdByFilter !== "Visi" ? `Užregistravo: ${createdByFilter}` : null,
     ].filter(Boolean) as string[];
     return tags.length ? tags : ["Visi filtrai"];
-  }, [activeStatus, originFilter, priorityFilter, responsibleFilter, typeFilter]);
+  }, [activeStatus, createdByFilter, executorFilter, originFilter, priorityFilter, responsibleFilter, roomFilter, titleFilter, typeFilter]);
   const openCount = activeProjectDefects.length;
   const today = new Date().toISOString().slice(0, 10);
   const overdueCount = activeProjectDefects.filter((defect) => defect.due !== "Nenustatyta" && defect.due < today).length;
@@ -571,8 +711,8 @@ export default function Home({ initialData = null }: HomeProps) {
       showToast(isClient ? "Nuoroda nepriskyrė objekto. Paprašykite Distyle naujos nuorodos." : "Pirmiausia pasirinkite projektą");
       return;
     }
-    if (!title || !room || !zone) {
-      showToast("Nurodykite pavadinimą, patalpą ir zoną");
+    if (!title || !room) {
+      showToast("Nurodykite pavadinimą ir patalpą");
       return;
     }
     if (captureRecordType === "Brokas" && !photoDrafts.length && !videoDrafts.length) {
@@ -905,28 +1045,138 @@ export default function Home({ initialData = null }: HomeProps) {
     }
     setDetailMetaSaving(true);
     const payload = {
+      recordType: detailMetaDraft.recordType,
+      projectId: detailMetaDraft.projectId,
+      title: detailMetaDraft.title,
+      room: detailMetaDraft.room,
+      zone: detailMetaDraft.zone,
       ...buildResponsiblePayload(detailMetaDraft.responsible, detailMetaDraft.assignee),
+      executor: detailMetaDraft.executor,
+      supervisorId: detailMetaDraft.supervisorId || null,
       due: detailMetaDraft.due || "Nenustatyta",
       status: detailMetaDraft.status,
       requestedBy: detailMetaDraft.requestedBy,
       price: detailMetaDraft.price,
       notes: detailMetaDraft.notes,
       resolution: detailMetaDraft.resolution,
+      visibleToClient: detailMetaDraft.visibleToClient,
     };
     const saved = await persistPatch(detailId, payload);
     setDetailMetaSaving(false);
     if (saved) {
-      setDetailMetaDraft({
-        responsible: detailMetaDraft.responsible,
-        assignee: payload.assignee,
-        due: payload.due,
-        status: payload.status,
-        requestedBy: payload.requestedBy,
-        price: payload.price,
-        notes: payload.notes,
-        resolution: payload.resolution,
-      });
+      setDetailMetaDraft({ ...detailMetaDraft });
       showToast("Pakeitimai išsaugoti");
+    }
+  }
+
+  async function saveChildTask(taskId: string) {
+    if (!detailId) return;
+    const draft = childTaskDrafts[taskId];
+    if (!draft?.title.trim()) {
+      showToast("Įveskite užduoties pavadinimą");
+      return;
+    }
+    setChildTaskSavingId(taskId);
+    try {
+      const response = await fetch(`/api/defects/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: draft.title.trim(), status: draft.status }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Nepavyko išsaugoti");
+      setDefects((items) => items.map((item) => item.id === detailId ? {
+        ...item,
+        childTasks: (item.childTasks ?? []).map((task) => task.id === taskId ? { ...task, title: draft.title.trim(), status: draft.status } : task),
+      } : item));
+      showToast("Užduotis išsaugota");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Nepavyko išsaugoti užduoties");
+    } finally {
+      setChildTaskSavingId(null);
+    }
+  }
+
+  async function createLinkedTask(titleOverride?: string) {
+    if (!detailId || !detail) return;
+    const title = (titleOverride ?? linkedTaskTitle).trim();
+    if (!title) {
+      setLinkedTaskOpen(true);
+      return;
+    }
+    setLinkedTaskSaving(true);
+    try {
+      const response = await fetch("/api/defects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: detail.projectId,
+          parentRecordId: detailId,
+          recordType: "Užduotis",
+          title,
+          room: detail.room || detail.zone || "—",
+          zone: detail.zone ?? "",
+          issues: [{ issue: `Susijęs su ${detail.code}: ${detail.title}`, requiredWork: "" }],
+        }),
+      });
+      const payload = await response.json() as { defect?: Defect; error?: string };
+      if (!response.ok || !payload.defect) throw new Error(payload.error || "Nepavyko sukurti užduoties");
+      const saved = { ...payload.defect, status: normalizeStatus(payload.defect.status), created: formatCreated(payload.defect.created), selected: true };
+      const childTask = {
+        id: saved.id,
+        code: saved.code,
+        title: saved.title,
+        status: saved.status,
+      };
+      setDefects((items) => items.map((item) => item.id === detailId
+        ? { ...item, childTasks: [...(item.childTasks ?? []), childTask] }
+        : item));
+      setLinkedTaskTitle("");
+      setLinkedTaskOpen(false);
+      showToast(`${saved.code} sukurta`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Nepavyko sukurti užduoties");
+    } finally {
+      setLinkedTaskSaving(false);
+    }
+  }
+
+  async function deleteMedia(mediaId: string) {
+    if (!detailId || !window.confirm("Ištrinti šį failą?")) return;
+    try {
+      const response = await fetch(`/api/media/${detailId}/${mediaId}`, { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json() as { error?: string };
+        throw new Error(payload.error || "Nepavyko ištrinti");
+      }
+      setDefects((items) => items.map((item) => {
+        if (item.id !== detailId) return item;
+        const photos = defectPhotosFor(item).filter((photo) => photo.id !== mediaId);
+        const videos = defectVideosFor(item).filter((video) => video.id !== mediaId);
+        return { ...item, photos, videos, photo: photos[0]?.url };
+      }));
+      showToast("Failas pašalintas");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Nepavyko ištrinti failo");
+    }
+  }
+
+  async function hardDeleteDetail() {
+    if (!detailId || !can(profile, "delete_records")) return;
+    if (!window.confirm("Ištrinti visam laikui? Įrašas ir visi failai bus pašalinti negrįžtamai.")) return;
+    const id = detailId;
+    setDetailId(null);
+    try {
+      const response = await fetch(`/api/defects/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const payload = await response.json() as { error?: string };
+        throw new Error(payload.error || "Nepavyko ištrinti");
+      }
+      setDefects((items) => items.filter((item) => item.id !== id));
+      showToast("Įrašas ištrintas visam laikui");
+    } catch (error) {
+      setDetailId(id);
+      showToast(error instanceof Error ? error.message : "Nepavyko ištrinti");
     }
   }
 
@@ -939,7 +1189,7 @@ export default function Home({ initialData = null }: HomeProps) {
       setCompleteOpen(true);
       return;
     }
-    if (!window.confirm("Ištrinti šį įrašą? Jis bus perkeltas į archyvą ir dings iš aktyvaus sąrašo.")) return;
+    if (!window.confirm("Archyvuoti šį įrašą? Jis dings iš aktyvaus sąrašo, bet liks archyve.")) return;
     const id = detailId;
     setMediaViewerIndex(null);
     setCaptureViewerIndex(null);
@@ -949,7 +1199,7 @@ export default function Home({ initialData = null }: HomeProps) {
       setDetailId(id);
       return;
     }
-    showToast("Įrašas perkeltas į archyvą");
+    showToast("Įrašas archyvuotas");
   }
 
   async function confirmComplete() {
@@ -964,10 +1214,10 @@ export default function Home({ initialData = null }: HomeProps) {
     setCaptureViewerIndex(null);
     setDetailId(null);
     setCompleteSaving(true);
-    setDefects((items) => items.map((item) => item.id === id ? { ...item, status: COMPLETED_STATUS, archived: true } : item));
+    setDefects((items) => items.map((item) => item.id === id ? { ...item, status: COMPLETED_STATUS } : item));
     setActiveStatus(COMPLETED_STATUS);
     try {
-      const saved = await persistPatch(id, { status: COMPLETED_STATUS, archived: true });
+      const saved = await persistPatch(id, { status: COMPLETED_STATUS });
       if (!saved) {
         setDetailId(id);
         return;
@@ -1020,7 +1270,7 @@ export default function Home({ initialData = null }: HomeProps) {
 
   async function restoreDetail() {
     if (!detailId) return;
-    const saved = await persistPatch(detailId, { archived: false, status: "Naujas" });
+    const saved = await persistPatch(detailId, { archived: false });
     if (!saved) return;
     showToast("Įrašas grąžintas į sąrašą");
   }
@@ -1143,9 +1393,8 @@ export default function Home({ initialData = null }: HomeProps) {
     setProjectPickerOpen(false);
   }
 
-  async function saveEditedProject(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!editProjectId || !editProjectName.trim()) return;
+  async function saveEditedProject(payload: { name: string; address: string; status: ProjectStatus; contacts: Array<{ role: string; name: string; phone: string; email: string; category: string; workScope: string; contactId?: string }> }) {
+    if (!editProjectId) return;
     setEditProjectSaving(true);
     try {
       const response = await fetch("/api/projects", {
@@ -1153,22 +1402,38 @@ export default function Home({ initialData = null }: HomeProps) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           id: editProjectId,
-          name: editProjectName.trim(),
-          address: editProjectAddress.trim(),
-          status: editProjectStatus,
+          name: payload.name,
+          address: payload.address,
+          status: payload.status,
         }),
       });
-      const payload = await response.json() as { project?: Project; error?: string };
-      if (!response.ok || !payload.project) throw new Error(payload.error || "Projekto atnaujinti nepavyko");
+      const body = await response.json() as { project?: Project; error?: string };
+      if (!response.ok || !body.project) throw new Error(body.error || "Projekto atnaujinti nepavyko");
+      await fetch(`/api/projects/${editProjectId}/contacts`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          contacts: payload.contacts.map((item) => ({
+            id: item.contactId,
+            role: item.role,
+            name: item.name,
+            phone: item.phone,
+            email: item.email,
+            category: item.category,
+            workScope: item.workScope,
+            notifyEmail: false,
+          })),
+        }),
+      });
       setProjects((items) => items.map((item) => item.id === editProjectId ? {
         ...item,
-        name: payload.project!.name,
-        address: payload.project!.address,
-        status: payload.project!.status,
-        archived: payload.project!.archived,
+        name: body.project!.name,
+        address: body.project!.address,
+        status: body.project!.status,
+        archived: body.project!.archived,
       } : item));
       setEditProjectId(null);
-      showToast(payload.project.status === "Baigtas" ? "Projektas pažymėtas kaip baigtas" : "Projektas atnaujintas");
+      showToast(body.project.status === "Baigtas" ? "Projektas pažymėtas kaip baigtas" : "Projektas atnaujintas");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Projekto atnaujinti nepavyko");
     } finally {
@@ -1265,13 +1530,30 @@ export default function Home({ initialData = null }: HomeProps) {
     });
   }
 
-  function printReport() {
+  async function printReport() {
     if (!exportRows.length) return showToast("Nėra ką eksportuoti");
     if (!reportRows.length) showToast(`Spausdinami visi matomi įrašai (${exportRows.length})`);
+    const nextUrls: Record<string, string[]> = {};
+    const revokeFns: Array<() => void> = [];
+    for (const defect of exportRows) {
+      const photos = defectPhotosFor(defect).map((photo) => photo.url);
+      if (reportOptions.photos && photos.length) {
+        const prepared = await preparePrintImages(photos);
+        nextUrls[defect.id] = prepared.urls;
+        revokeFns.push(prepared.revoke);
+      }
+    }
+    setPrintImageUrls(nextUrls);
     const previousTitle = document.title;
     document.title = `${activeProject.name} – darbų ataskaita`;
-    window.print();
-    window.setTimeout(() => { document.title = previousTitle; }, 1200);
+    window.setTimeout(() => {
+      window.print();
+      window.setTimeout(() => {
+        document.title = previousTitle;
+        revokeFns.forEach((fn) => fn());
+        setPrintImageUrls({});
+      }, 1200);
+    }, 120);
   }
 
   async function openInviteModal() {
@@ -1315,9 +1597,9 @@ export default function Home({ initialData = null }: HomeProps) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ projectId, email: inviteEmail.trim(), origin: window.location.origin }),
       });
-      const payload = await response.json() as { invite?: { token: string }; error?: string };
+      const payload = await response.json() as { invite?: { token: string; link?: string }; error?: string };
       if (!response.ok || !payload.invite) throw new Error(payload.error || "Kvietimo sukurti nepavyko");
-      const link = `${window.location.origin}/login?invite=${payload.invite.token}`;
+      const link = payload.invite.link || `${window.location.origin}/login?invite=${payload.invite.token}`;
       setInviteLink(link);
       const copied = await copyText(link);
       showToast(copied ? "Kvietimo nuoroda nukopijuota" : "Nuoroda sukurta — nukopijuokite iš lauko");
@@ -1327,7 +1609,7 @@ export default function Home({ initialData = null }: HomeProps) {
   }
 
   async function toggleClientVisibility() {
-    if (!projectId || profile.role !== "staff") return;
+    if (!projectId || !isStaff) return;
     const next = !activeProject.clientsSeeStaffRecords;
     const response = await fetch("/api/projects", {
       method: "PATCH",
@@ -1387,7 +1669,11 @@ export default function Home({ initialData = null }: HomeProps) {
 
         <div className="profile-card">
           <div className="avatar">{initials(profile.displayName || profile.email || "U")}</div>
-          <div><strong>{profile.displayName || "Naudotojas"}</strong><span>{profile.role === "staff" ? "Distyle komanda" : "Klientas"}</span></div>
+          <div>
+            <strong>{profile.displayName || "Naudotojas"}</strong>
+            <span>{profile.isSuperAdmin || profile.role === "admin" ? "Administratorius" : profile.role === "staff" ? "Distyle komanda" : profile.role === "contractor" ? "Tiekėjas / montuotojas" : "Klientas"}</span>
+            {can(profile, "manage_users") ? <a className="admin-users-link" href="/admin/users">Vartotojai</a> : null}
+          </div>
           <form action="/logout" method="post"><button type="submit" aria-label="Atsijungti">⎋</button></form>
         </div>
       </aside>
@@ -1464,12 +1750,33 @@ export default function Home({ initialData = null }: HomeProps) {
             </div>
 
             {filtersOpen && (
-              <div className="filter-panel">
+              <div className="filter-panel filter-panel-wide">
                 <label><span>Įrašo tipas</span><select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value as RecordType | "Visi")}><option>Visi</option>{captureTypes.map((item) => <option key={item}>{item}</option>)}</select></label>
                 {isStaff && <label><span>Kas įkėlė</span><select value={originFilter} onChange={(event) => setOriginFilter(event.target.value as "Visi" | "Distyle" | "Klientas")}><option>Visi</option><option>Distyle</option><option>Klientas</option></select></label>}
                 <label><span>Atsakingas</span><select value={responsibleFilter} onChange={(event) => setResponsibleFilter(event.target.value)}><option>Visi</option>{responsibilities.map((item) => <option key={item}>{item}</option>)}</select></label>
                 <label><span>Prioritetas</span><select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}><option>Visi</option><option>Kritinis</option><option>Aukštas</option><option>Vidutinis</option><option>Žemas</option></select></label>
-                <button onClick={() => { setResponsibleFilter("Visi"); setPriorityFilter("Visi"); setTypeFilter("Visi"); setOriginFilter("Visi"); }}>Išvalyti filtrus</button>
+                <label><span>Patalpa / zona</span><input value={roomFilter} onChange={(event) => setRoomFilter(event.target.value)} placeholder="Pvz., B7" /></label>
+                <label><span>Pozicija</span><input value={titleFilter} onChange={(event) => setTitleFilter(event.target.value)} placeholder="Pvz., spinta" /></label>
+                <label><span>Vykdytojas</span><input value={executorFilter === "Visi" ? "" : executorFilter} onChange={(event) => setExecutorFilter(event.target.value || "Visi")} placeholder="Visi" /></label>
+                <label><span>Užregistravo</span><input value={createdByFilter === "Visi" ? "" : createdByFilter} onChange={(event) => setCreatedByFilter(event.target.value || "Visi")} placeholder="Visi" /></label>
+                <label><span>Terminas nuo</span><input type="date" value={dueFromFilter} onChange={(event) => setDueFromFilter(event.target.value)} /></label>
+                <label><span>Terminas iki</span><input type="date" value={dueToFilter} onChange={(event) => setDueToFilter(event.target.value)} /></label>
+                <label><span>Registracija nuo</span><input type="date" value={createdFromFilter} onChange={(event) => setCreatedFromFilter(event.target.value)} /></label>
+                <label><span>Registracija iki</span><input type="date" value={createdToFilter} onChange={(event) => setCreatedToFilter(event.target.value)} /></label>
+                <button onClick={() => {
+                  setResponsibleFilter("Visi");
+                  setPriorityFilter("Visi");
+                  setTypeFilter("Visi");
+                  setOriginFilter("Visi");
+                  setRoomFilter("");
+                  setTitleFilter("");
+                  setExecutorFilter("Visi");
+                  setCreatedByFilter("Visi");
+                  setDueFromFilter("");
+                  setDueToFilter("");
+                  setCreatedFromFilter("");
+                  setCreatedToFilter("");
+                }}>Išvalyti filtrus</button>
               </div>
             )}
 
@@ -1477,7 +1784,7 @@ export default function Home({ initialData = null }: HomeProps) {
               {statusTabs.map((status) => {
                 const count = status === "Visi"
                   ? activeProjectDefects.length
-                  : status === COMPLETED_STATUS
+                  : status === ARCHIVED_TAB
                     ? archivedCount
                     : activeProjectDefects.filter((item) => item.status === status).length;
                 return <button key={status} className={activeStatus === status ? "tab-active" : ""} onClick={() => setActiveStatus(status)}>{status} <span>{count}</span></button>;
@@ -1561,12 +1868,13 @@ export default function Home({ initialData = null }: HomeProps) {
             {exportRows.map((defect) => {
               const photos = defectPhotosFor(defect);
               const items = defectItemsFor(defect);
+              const fieldRows = buildReportFieldRows(defect, reportOptions);
+              const printPhotos = printImageUrls[defect.id] ?? photos.map((photo) => photo.url);
               return <article key={defect.id}>
-                <div className="print-defect-head"><div><small>{defect.code} · {defect.recordType} · {isClientOrigin(defect) ? `Klientas (${defect.createdByName || defect.createdByEmail || "—"})` : "Distyle"} · {placeLabel(defect)}</small><h2>{defect.title}</h2></div><span className={statusClass(defect.status)}><i />{defect.status}</span></div>
-                {reportOptions.photos && photos.length > 0 && <div className="print-photo-grid">{photos.map((photo, index) => <figure key={photo.id}><img src={photo.url} alt={`${defect.title}, nuotrauka ${index + 1}`} />{photo.caption && <figcaption>{photo.caption}</figcaption>}</figure>)}</div>}
-                {reportOptions.descriptions && <div className="print-issues">{items.map((item, index) => <div key={item.id}><b>{index + 1}</b><p><strong>{recordCopy[defect.recordType].issueLabel.replace(" *", "")}:</strong> {item.issue}<br /><strong>{recordCopy[defect.recordType].workLabel}:</strong> {item.requiredWork || "Nenurodyta"}</p></div>)}</div>}
-                {reportOptions.commercial && defect.recordType === "Papildoma apimtis" && <div className="print-commercial"><span>Kas paprašė: <b>{defect.requestedBy || "Nenurodyta"}</b></span><span>Kaina: <b>{formatPrice(defect.price)}</b></span>{defect.notes && <p><b>Pastabos:</b> {defect.notes}</p>}</div>}
-                {reportOptions.responsibility && <footer><span>Atsakingas: <b>{responsibleDisplay(defect.responsible, defect.assignee)}</b></span><span>Terminas: <b>{defect.due}</b></span><span>Prioritetas: <b>{defect.priority}</b></span></footer>}
+                <div className="print-defect-head"><div><small>{defect.code} · {defect.recordType}</small>{reportOptions.title && <h2>{defect.title}</h2>}</div>{reportOptions.status && <span className={statusClass(defect.status)}><i />{defect.status}</span>}</div>
+                {fieldRows.length > 0 && <div className="print-field-rows">{fieldRows.map((row) => <p key={row.label}><strong>{row.label}:</strong> {row.value}</p>)}</div>}
+                {reportOptions.photos && photos.length > 0 && <div className="print-photo-grid">{photos.map((photo, index) => <figure key={photo.id}><img src={printPhotos[index] ?? photo.url} alt={`${defect.title}, nuotrauka ${index + 1}`} />{photo.caption && <figcaption>{photo.caption}</figcaption>}</figure>)}</div>}
+                {reportOptions.descriptions && <div className="print-issues">{items.map((item, index) => <div key={item.id}><b>{index + 1}</b><p>{reportOptions.descriptions && <><strong>{recordCopy[defect.recordType].issueLabel.replace(" *", "")}:</strong> {item.issue}<br /></>}{reportOptions.requiredWork && <><strong>{recordCopy[defect.recordType].workLabel}:</strong> {item.requiredWork || "Nenurodyta"}</>}</p></div>)}</div>}
               </article>;
             })}
           </section>
@@ -1618,7 +1926,7 @@ export default function Home({ initialData = null }: HomeProps) {
             <div className="form-grid capture-essentials">
               <label className="wide"><span>{recordCopy[captureRecordType].titleLabel}</span><input name="title" required placeholder={recordCopy[captureRecordType].titlePlaceholder} enterKeyHint="next" autoComplete="off" /></label>
               <label><span>Patalpa *</span><input name="room" required placeholder="Pvz., Miegamasis" enterKeyHint="next" autoComplete="off" /></label>
-              <label><span>Zona *</span><input name="zone" required placeholder="Pvz., Spinta / kairė" enterKeyHint="done" autoComplete="off" /></label>
+              <label><span>Zona</span><input name="zone" placeholder="Pvz., Spinta / kairė (nebūtina)" enterKeyHint="done" autoComplete="off" /></label>
             </div>
 
             <section className="photo-capture-block">
@@ -1761,13 +2069,13 @@ export default function Home({ initialData = null }: HomeProps) {
             </label>
             <div className="project-choice-list">
               {filteredProjects.map((project) => (
-                <div key={project.id} className={`project-choice-row ${profile.role === "staff" ? "project-choice-row-staff" : ""} ${project.id === resolvedProjectId ? "project-choice-active" : ""}`}>
+                <div key={project.id} className={`project-choice-row ${isStaff ? "project-choice-row-staff" : ""} ${project.id === resolvedProjectId ? "project-choice-active" : ""}`}>
                   <button type="button" onClick={() => selectProject(project.id)}>
                     <span className="project-choice-dot" />
                     <span><strong>{project.name}</strong><small>{isProjectCompleted(project) ? "Baigtas" : project.address || "Informaciją papildysite vėliau"}</small></span>
                     <em>{project.id === resolvedProjectId ? "Pasirinktas" : "Pasirinkti"}</em>
                   </button>
-                  {profile.role === "staff" ? (
+                  {isStaff ? (
                     <>
                       <button type="button" className="project-choice-edit" onClick={() => openEditProject(project)} aria-label={`Redaguoti ${project.name}`}>✎</button>
                       <button type="button" className="project-choice-delete" onClick={() => void deleteProjectById(project.id)} aria-label={`Ištrinti ${project.name}`} disabled={editProjectSaving}>🗑</button>
@@ -1777,12 +2085,12 @@ export default function Home({ initialData = null }: HomeProps) {
               ))}
               {!filteredProjects.length && <div className="project-choice-empty">{showCompletedProjects ? "Pagal paiešką projektų nerasta." : "Nėra vykdomų projektų. Įjunkite „Rodyti baigtus“ arba sukurkite naują."}</div>}
             </div>
-            {profile.role === "staff" && <button type="button" className="project-create-button" onClick={() => { setProjectPickerOpen(false); setNewProjectOpen(true); }}>＋ Sukurti naują projektą</button>}
+            {isStaff && <button type="button" className="project-create-button" onClick={() => { setProjectPickerOpen(false); setNewProjectOpen(true); }}>＋ Sukurti naują projektą</button>}
           </section>
         </div>
       )}
 
-      {newProjectOpen && profile.role === "staff" && (
+      {newProjectOpen && isStaff && (
         <div className="modal-layer project-modal-layer" role="dialog" aria-modal="true" aria-labelledby="project-title">
           <button className="modal-scrim" onClick={() => setNewProjectOpen(false)} aria-label="Uždaryti" />
           <form className="project-modal" onSubmit={addProject}>
@@ -1794,34 +2102,22 @@ export default function Home({ initialData = null }: HomeProps) {
         </div>
       )}
 
-      {editProjectId && profile.role === "staff" && (
-        <div className="modal-layer project-modal-layer" role="dialog" aria-modal="true" aria-labelledby="edit-project-title">
-          <button className="modal-scrim" onClick={() => !editProjectSaving && setEditProjectId(null)} aria-label="Uždaryti" />
-          <form className="project-modal" onSubmit={saveEditedProject}>
-            <div className="panel-title"><div><span>Objektas</span><h2 id="edit-project-title">Redaguoti projektą</h2></div><button type="button" onClick={() => setEditProjectId(null)} aria-label="Uždaryti" disabled={editProjectSaving}>×</button></div>
-            <p>Pataisykite pavadinimą ar adresą. Baigtus objektus paslėpsime nuo aktyvaus sąrašo, bet galėsite juos rasti per „Rodyti baigtus“.</p>
-            <label><span>Projekto pavadinimas *</span><input value={editProjectName} onChange={(event) => setEditProjectName(event.target.value)} required placeholder="Pvz., BURGA" autoFocus /></label>
-            <label><span>Adresas</span><input value={editProjectAddress} onChange={(event) => setEditProjectAddress(event.target.value)} placeholder="Pvz., Kauno LEZ" /></label>
-            <label><span>Būsena</span>
-              <select value={editProjectStatus} onChange={(event) => setEditProjectStatus(event.target.value as ProjectStatus)}>
-                {projectStatuses.map((status) => <option key={status}>{status}</option>)}
-              </select>
-            </label>
-            <div className="panel-actions project-edit-actions">
-              <button type="button" className="danger-button" onClick={() => void deleteEditedProject()} disabled={editProjectSaving}>Ištrinti</button>
-              <button type="button" className="secondary-button" onClick={() => setEditProjectId(null)} disabled={editProjectSaving}>Atšaukti</button>
-              <button type="submit" className="primary-button" disabled={editProjectSaving || !editProjectName.trim()}>{editProjectSaving ? "Saugoma…" : "Išsaugoti"}</button>
-            </div>
-          </form>
-        </div>
+      {editProjectId && isStaff && projects.find((project) => project.id === editProjectId) && (
+        <ProjectEdit
+          project={projects.find((project) => project.id === editProjectId)!}
+          saving={editProjectSaving}
+          onClose={() => setEditProjectId(null)}
+          onSave={saveEditedProject}
+          onDelete={() => void deleteEditedProject()}
+        />
       )}
 
-      {inviteOpen && profile.role === "staff" && (
+      {inviteOpen && isStaff && (
         <div className="modal-layer project-modal-layer" role="dialog" aria-modal="true" aria-labelledby="invite-title">
           <button className="modal-scrim" onClick={() => setInviteOpen(false)} aria-label="Uždaryti" />
           <form className="project-modal invite-modal" onSubmit={sendInvite}>
             <div className="panel-title"><div><span>{activeProject.name}</span><h2 id="invite-title">Klientų nuoroda</h2></div><button type="button" onClick={() => setInviteOpen(false)} aria-label="Uždaryti">×</button></div>
-            <p>Pirmą kartą klientas atidaro šią nuorodą ir susikuria paskyrą (savo el. paštas + slaptažodis). Kitą kartą jam užtenka atidaryti programėlę (vėliau <b>brokai.distyle.lt</b>) ir prisijungti tuo pačiu acc — nuorodos nebereikia, matys tik šį objektą.</p>
+            <p>Be el. pašto: nukopijuokite nuorodą (arba WhatsApp) ir perduokite klientui. Jis atidaro nuorodą, įveda savo el. paštą + slaptažodį — paskyra sukuriama iš karto. Kitą kartą užtenka atidaryti programėlę ir prisijungti — matys tik šį objektą.</p>
             <label className="invite-toggle"><input type="checkbox" checked={Boolean(activeProject.clientsSeeStaffRecords)} onChange={() => void toggleClientVisibility()} /><span>Klientas mato ir Distyle pažymėtus brokus</span></label>
             <div className="share-link-box">
               <strong>Bendroji nuoroda</strong>
@@ -1836,7 +2132,7 @@ export default function Home({ initialData = null }: HomeProps) {
                     aria-label="Klientų nuoroda"
                   />
                   {shareLink.includes("localhost") || shareLink.includes("127.0.0.1") || shareLink.includes("0.0.0.0") ? (
-                    <p className="share-link-hint">Telefone atidarykite programėlę per Wi‑Fi adresą (pvz. http://192.168.x.x:3010) ir sugeneruokite nuorodą iš naujo.</p>
+                    <p className="share-link-hint">Ši nuoroda neveiks kliento telefone. Atidarykite programėlę per viešą adresą (pvz. broku-registravimas.vercel.app) ir sugeneruokite nuorodą iš naujo.</p>
                   ) : null}
                   <div className="share-link-actions">
                     <button type="button" className="secondary-button" onClick={() => void copyShareLink()}>Kopijuoti / Dalintis</button>
@@ -1871,16 +2167,21 @@ export default function Home({ initialData = null }: HomeProps) {
             {detailMedia.length ? (
               <div className="drawer-thumbs">
                 {detailMedia.map((item, index) => (
-                  <button type="button" key={item.id} className="drawer-thumb" onClick={() => setMediaViewerIndex(index)}>
-                    {item.kind === "video" ? (
-                      <>
-                        <video src={item.url} muted playsInline preload="metadata" />
-                        <span className="thumb-play">▶</span>
-                      </>
-                    ) : (
-                      <span className="thumb-photo" style={{ backgroundImage: `url(${item.url})` }} />
-                    )}
-                  </button>
+                  <div key={item.id} className="drawer-thumb-wrap">
+                    <button type="button" className="drawer-thumb" onClick={() => setMediaViewerIndex(index)}>
+                      {item.kind === "video" ? (
+                        <>
+                          <video src={item.url} muted playsInline preload="metadata" />
+                          <span className="thumb-play">▶</span>
+                        </>
+                      ) : (
+                        <span className="thumb-photo" style={{ backgroundImage: `url(${item.url})` }} />
+                      )}
+                    </button>
+                    {can(profile, "delete_media") && !item.id.startsWith("legacy-") ? (
+                      <button type="button" className="drawer-thumb-delete" onClick={() => void deleteMedia(item.id)} aria-label="Ištrinti failą">×</button>
+                    ) : null}
+                  </div>
                 ))}
               </div>
             ) : (
@@ -1896,7 +2197,17 @@ export default function Home({ initialData = null }: HomeProps) {
           </div>
           <div className="drawer-body">
             <span className={statusClass(detail.status)}><i />{detail.status}</span>
-            <h2>{detail.title}</h2>
+            <p className="detail-created-by">Užregistravo: <b>{detail.createdByName || detail.createdByEmail || "—"}</b> · {detail.created}</p>
+            {detailMetaDraft && isStaff && (
+              <div className="detail-core-fields form-grid">
+                <label><span>Tipas</span><select value={detailMetaDraft.recordType} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, recordType: event.target.value as RecordType } : draft)}>{recordTypes.map((item) => <option key={item}>{item}</option>)}</select></label>
+                <label><span>Projektas</span><select value={detailMetaDraft.projectId} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, projectId: event.target.value } : draft)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+                <label className="wide"><span>Pozicija / pavadinimas</span><input value={detailMetaDraft.title} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, title: event.target.value } : draft)} /></label>
+                <label><span>Patalpa</span><input value={detailMetaDraft.room} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, room: event.target.value } : draft)} /></label>
+                <label><span>Zona</span><input value={detailMetaDraft.zone} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, zone: event.target.value } : draft)} /></label>
+              </div>
+            )}
+            {!isStaff && <h2>{detail.title}</h2>}
             <p className="detail-summary">{mediaLine(detailPhotos.length, detailVideos.length, detailItems.length) || "Be pastabų"}</p>
             <section className="detail-issues">
               {showDetailNotes ? (
@@ -1922,7 +2233,7 @@ export default function Home({ initialData = null }: HomeProps) {
               <label><span>Pastabos</span><textarea rows={3} value={detailMetaDraft.notes} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, notes: event.target.value } : draft)} placeholder="Suderinimai, sąlygos ar kita informacija" /></label>
               <hr />
             </div>}
-            {detailMetaDraft && <div className="detail-meta">
+            {detailMetaDraft && isStaff && <div className="detail-meta">
               <ResponsiblePicker
                 idPrefix="detail-responsible"
                 party={detailMetaDraft.responsible}
@@ -1930,17 +2241,82 @@ export default function Home({ initialData = null }: HomeProps) {
                 onPartyChange={(party) => setDetailMetaDraft((draft) => draft ? { ...draft, responsible: party, assignee: party === RESPONSIBLE_OTHER ? draft.assignee : "" } : draft)}
                 onOtherTextChange={(value) => setDetailMetaDraft((draft) => draft ? { ...draft, assignee: value } : draft)}
               />
+              <label><span>Darbų vykdytojas</span><input value={detailMetaDraft.executor} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, executor: event.target.value } : draft)} placeholder="Pvz., montuotojai" /></label>
+              <label><span>Prižiūri</span>
+                <select value={detailMetaDraft.supervisorId} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, supervisorId: event.target.value } : draft)}>
+                  <option value="">—</option>
+                  {staffUsers.map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}
+                </select>
+              </label>
               <label><span>Terminas</span><input type="date" value={detailMetaDraft.due === "Nenustatyta" ? "" : detailMetaDraft.due} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, due: event.target.value || "Nenustatyta" } : draft)} /></label>
               <label><span>Būsena</span><select value={detailMetaDraft.status} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, status: event.target.value as Status } : draft)}>{statusList.map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label className="invite-toggle"><input type="checkbox" checked={detailMetaDraft.visibleToClient} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, visibleToClient: event.target.checked } : draft)} /><span>Matoma užsakovui</span></label>
             </div>}
             {detailMetaDraft && <label><span>Sprendimo būdas / atlikti darbai</span><textarea rows={4} value={detailMetaDraft.resolution} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, resolution: event.target.value } : draft)} placeholder="Aprašykite, kaip įrašas bus arba buvo įvykdytas…" /></label>}
+            {isStaff && detail.recordType !== "Užduotis" && (
+              <section className="detail-linked-tasks">
+                <div className="detail-section-title"><strong>Susijusios užduotys</strong><button type="button" onClick={() => setLinkedTaskOpen((open) => !open)}>＋ Pridėti</button></div>
+                {linkedTaskOpen && (
+                  <form className="linked-task-form" onSubmit={(event) => { event.preventDefault(); void createLinkedTask(); }}>
+                    <input
+                      value={linkedTaskTitle}
+                      onChange={(event) => setLinkedTaskTitle(event.target.value)}
+                      placeholder="Užduoties pavadinimas"
+                      autoFocus
+                    />
+                    <button type="submit" className="primary-button" disabled={linkedTaskSaving || !linkedTaskTitle.trim()}>
+                      {linkedTaskSaving ? "Kuriama…" : "Sukurti"}
+                    </button>
+                  </form>
+                )}
+                {(detail.childTasks ?? []).length ? (
+                  <ul className="child-task-list">
+                    {detail.childTasks!.map((task) => {
+                      const draft = childTaskDrafts[task.id] ?? { title: task.title, status: normalizeStatus(task.status) };
+                      const dirty = draft.title !== task.title || draft.status !== normalizeStatus(task.status);
+                      return (
+                        <li key={task.id} className="child-task-item">
+                          <span className="child-task-code">{task.code}</span>
+                          <input
+                            value={draft.title}
+                            onChange={(event) => setChildTaskDrafts((items) => ({ ...items, [task.id]: { ...draft, title: event.target.value } }))}
+                            placeholder="Užduoties pavadinimas"
+                          />
+                          <select
+                            value={draft.status}
+                            onChange={(event) => setChildTaskDrafts((items) => ({ ...items, [task.id]: { ...draft, status: event.target.value as Status } }))}
+                          >
+                            {statusList.map((item) => <option key={item}>{item}</option>)}
+                          </select>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={!dirty || childTaskSavingId === task.id}
+                            onClick={() => void saveChildTask(task.id)}
+                          >
+                            {childTaskSavingId === task.id ? "…" : "Išsaugoti"}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : <p className="drawer-no-media">Dar nėra susijusių užduočių.</p>}
+              </section>
+            )}
+            {recordEvents.length > 0 && (
+              <details className="detail-history" open={historyOpen} onToggle={(event) => setHistoryOpen((event.target as HTMLDetailsElement).open)}>
+                <summary>Veiksmų istorija <span>{recordEvents.length}</span></summary>
+                <ul>{recordEvents.map((event) => <li key={event.id}><b>{event.actor_name || event.actor_email || "Sistema"}</b> · {new Intl.DateTimeFormat("lt-LT", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(event.created_at))} · {event.message}</li>)}</ul>
+              </details>
+            )}
           </div>
           <div className="drawer-footer">
             {isRecordArchived(detail) ? (
               <button type="button" className="primary-button" onClick={() => void restoreDetail()}>Grąžinti į sąrašą</button>
             ) : (
               <>
-                <button type="button" className="danger-button" onClick={() => void archiveDetail("delete")}>Ištrinti</button>
+                <button type="button" className="danger-button" onClick={() => void archiveDetail("delete")}>Archyvuoti</button>
+                {can(profile, "delete_records") && <button type="button" className="danger-button" onClick={() => void hardDeleteDetail()}>Ištrinti visam laikui</button>}
                 {detailMetaDirty && (
                   <button type="button" className="secondary-button drawer-save-button" onClick={() => void saveDetailMeta()} disabled={detailMetaSaving}>
                     {detailMetaSaving ? "Saugoma…" : "Išsaugoti"}
@@ -1976,12 +2352,9 @@ export default function Home({ initialData = null }: HomeProps) {
                   </div>
                 </div>
                 <div className="report-setting-section"><strong>Ką rodyti ataskaitoje?</strong>
-                  {([
-                    ["photos", "Nuotraukas"],
-                    ["descriptions", "Aprašymus ir darbus"],
-                    ["responsibility", "Atsakingus ir terminus"],
-                    ["commercial", "Kainą ir pastabas"],
-                  ] as const).map(([key, label]) => <label key={key}><input type="checkbox" checked={reportOptions[key]} onChange={(event) => setReportOptions((value) => ({ ...value, [key]: event.target.checked }))} /><span>{label}</span></label>)}
+                  {(Object.keys(REPORT_OPTION_LABELS) as Array<keyof typeof REPORT_OPTION_LABELS>).map((key) => (
+                    <label key={key}><input type="checkbox" checked={reportOptions[key]} onChange={(event) => setReportOptions((value) => ({ ...value, [key]: event.target.checked }))} /><span>{REPORT_OPTION_LABELS[key]}</span></label>
+                  ))}
                 </div>
               </aside>
               <div className="report-preview">
@@ -1991,12 +2364,12 @@ export default function Home({ initialData = null }: HomeProps) {
                   {exportRows.map((item) => {
                     const photos = defectPhotosFor(item);
                     const issues = defectItemsFor(item);
+                    const fieldRows = buildReportFieldRows(item, reportOptions);
                     return <article key={item.id}>
-                      <div className="report-preview-title"><div><small>{item.code} · {item.recordType} · {placeLabel(item)}</small><h4>{item.title}</h4></div><span className={statusClass(item.status)}><i />{item.status}</span></div>
+                      <div className="report-preview-title"><div><small>{item.code} · {item.recordType}</small>{reportOptions.title && <h4>{item.title}</h4>}</div>{reportOptions.status && <span className={statusClass(item.status)}><i />{item.status}</span>}</div>
+                      {fieldRows.length > 0 && <div className="report-preview-fields">{fieldRows.map((row) => <p key={row.label}><strong>{row.label}:</strong> {row.value}</p>)}</div>}
                       {reportOptions.photos && photos.length > 0 && <div className="report-preview-photos">{photos.slice(0, 4).map((photo) => <img key={photo.id} src={photo.url} alt="" />)}{photos.length > 4 && <span>+{photos.length - 4}</span>}</div>}
-                      {reportOptions.descriptions && <div className="report-preview-issues">{issues.map((issue, index) => <p key={issue.id}><b>{index + 1}.</b> {issue.issue}{issue.requiredWork && <small>Ką atlikti: {issue.requiredWork}</small>}</p>)}</div>}
-                      {reportOptions.commercial && item.recordType === "Papildoma apimtis" && <div className="report-preview-commercial"><span>Kas paprašė: <b>{item.requestedBy || "—"}</b></span><span>Kaina: <b>{formatPrice(item.price)}</b></span></div>}
-                      {reportOptions.responsibility && <footer><span>{responsibleDisplay(item.responsible, item.assignee)}</span><span>{item.due}</span></footer>}
+                      {reportOptions.descriptions && <div className="report-preview-issues">{issues.map((issue, index) => <p key={issue.id}><b>{index + 1}.</b> {issue.issue}{reportOptions.requiredWork && issue.requiredWork && <small>Ką atlikti: {issue.requiredWork}</small>}</p>)}</div>}
                     </article>;
                   })}
                 </div>

@@ -1,4 +1,4 @@
-import { apiError, requireUser } from "@/lib/auth";
+import { apiError, requirePermission, requireUser } from "@/lib/auth";
 import { ACTIVE_PROJECT_STATUS, COMPLETED_PROJECT_STATUS, isProjectCompleted, normalizeProjectStatus, projectStatuses } from "@/lib/constants";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +27,7 @@ function mapProject(project: {
 export async function POST(request: Request) {
   try {
     const { supabase, profile } = await requireUser();
-    if (profile.role !== "staff") return Response.json({ error: "Projektus gali kurti tik Distyle komanda." }, { status: 403 });
+    requirePermission(profile, "manage_projects");
     const payload = await request.json() as { name?: string; address?: string };
     const name = payload.name?.trim() ?? "";
     if (!name) return Response.json({ error: "Objekto pavadinimas yra privalomas." }, { status: 400 });
@@ -53,7 +53,7 @@ export async function POST(request: Request) {
 export async function PATCH(request: Request) {
   try {
     const { supabase, profile } = await requireUser();
-    if (profile.role !== "staff") return Response.json({ error: "Nustatymus gali keisti tik Distyle komanda." }, { status: 403 });
+    requirePermission(profile, "manage_projects");
     const payload = await request.json() as { id?: string; name?: string; address?: string; status?: string; clientsSeeStaffRecords?: boolean };
     if (!payload.id) return Response.json({ error: "Nenurodytas projektas." }, { status: 400 });
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -80,7 +80,7 @@ export async function PATCH(request: Request) {
 export async function DELETE(request: Request) {
   try {
     const { supabase, profile } = await requireUser();
-    if (profile.role !== "staff") return Response.json({ error: "Projektus gali trinti tik Distyle komanda." }, { status: 403 });
+    requirePermission(profile, "delete_records");
     const id = new URL(request.url).searchParams.get("id")?.trim() ?? "";
     if (!id) return Response.json({ error: "Nenurodytas projektas." }, { status: 400 });
     const { error } = await supabase.from("projects").delete().eq("id", id);
