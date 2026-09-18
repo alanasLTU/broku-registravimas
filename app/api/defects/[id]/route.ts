@@ -143,7 +143,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
         updates.status = nextStatus;
         const completed = nextStatus === COMPLETED_STATUS;
         if (completed) updates.resolved_at = new Date().toISOString();
-        if (normalizeStatus(before.status) === PENDING_APPROVAL_STATUS && nextStatus !== PENDING_APPROVAL_STATUS) {
+        if (normalizeStatus(before.status) === PENDING_APPROVAL_STATUS) {
           clearCompletionRequest(updates);
         }
       }
