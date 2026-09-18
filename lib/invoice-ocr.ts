@@ -1,4 +1,5 @@
 import { INVOICE_OCR_STATUSES, type InvoiceOcrStatus } from "@/lib/constants";
+import { normalizeInvoiceDate } from "@/lib/date-format";
 import type { InvoicePrefill } from "@/lib/invoices";
 
 const EMPTY_PREFILL: InvoicePrefill = {
@@ -40,7 +41,7 @@ function mapPrefill(raw: Record<string, unknown> | null): InvoicePrefill {
   return {
     supplierName: String(raw.supplierName ?? raw.supplier_name ?? "").trim().slice(0, 300),
     invoiceNumber: String(raw.invoiceNumber ?? raw.invoice_number ?? "").trim().slice(0, 120),
-    invoiceDate: String(raw.invoiceDate ?? raw.invoice_date ?? "").trim().slice(0, 10),
+    invoiceDate: normalizeInvoiceDate(String(raw.invoiceDate ?? raw.invoice_date ?? "")),
     amountExVat: String(raw.amountExVat ?? raw.amount_ex_vat ?? "").trim(),
     vat: String(raw.vat ?? raw.vat_amount ?? "").trim(),
     amountIncVat: String(raw.amountIncVat ?? raw.amount_inc_vat ?? "").trim(),

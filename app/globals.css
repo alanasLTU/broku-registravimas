@@ -1245,7 +1245,13 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   background: white;
 }
 .date-input-row > input[type="text"]:focus { border-color: #89958f; box-shadow: 0 0 0 3px rgba(90,111,101,.08); outline: 0; }
-.date-input-picker {
+.date-input-picker-wrap {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+}
+.date-input-picker-icon {
   display: grid;
   place-items: center;
   width: 42px;
@@ -1253,16 +1259,21 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   border: 1px solid #dce1dd;
   border-radius: 8px;
   background: white;
-  cursor: pointer;
   font-size: 18px;
+  pointer-events: none;
 }
-.date-input-picker:hover { background: #f7f9f8; }
 .date-input-native {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
   opacity: 0;
-  pointer-events: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
 }
 .date-input-hint { color: #78827e; font-size: 11px; }
 .form-grid .date-input-row > input[type="text"],
