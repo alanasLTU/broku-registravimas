@@ -108,6 +108,15 @@ export default function InvoiceCapture({
     void handleFile(picked);
   }
 
+  function clearFile() {
+    if (parseLoading || saving) return;
+    if (previewUrl?.startsWith("blob:")) URL.revokeObjectURL(previewUrl);
+    setFile(null);
+    setPreviewUrl(null);
+    setFields(EMPTY);
+    setOcrStatus("skipped");
+  }
+
   async function handleFile(next: File) {
     if (isInvoicePdfFile(next)) {
       if (next.size > 8 * 1024 * 1024) {
@@ -255,6 +264,9 @@ export default function InvoiceCapture({
           {previewUrl ? (
             <div className="invoice-preview-wrap">
               <img src={previewUrl} alt="Sąskaitos peržiūra" className={`invoice-preview-image${parseLoading ? " invoice-preview-dimmed" : ""}`} />
+              {!parseLoading ? (
+                <button type="button" className="photo-draft-remove invoice-file-remove" onClick={clearFile} aria-label="Pašalinti SF nuotrauką">×</button>
+              ) : null}
               {parseLoading ? (
                 <div className="invoice-preview-loading" role="status" aria-live="polite">
                   <span className="sync-refresh-icon is-spinning" aria-hidden>↻</span>
@@ -264,7 +276,10 @@ export default function InvoiceCapture({
               ) : null}
             </div>
           ) : file ? (
-            <div className="invoice-preview-pdf"><strong>{file.name}</strong><span>PDF failas</span></div>
+            <div className="invoice-preview-pdf invoice-preview-wrap">
+              <strong>{file.name}</strong><span>PDF failas</span>
+              <button type="button" className="photo-draft-remove invoice-file-remove" onClick={clearFile} aria-label="Pašalinti PDF failą">×</button>
+            </div>
           ) : (
             <div className="invoice-drop-empty">
               <span aria-hidden>⇩</span>
@@ -286,7 +301,7 @@ export default function InvoiceCapture({
             </MediaFileButton>
           </div>
           {file || previewUrl ? (
-            <p className="invoice-drop-hint">Arba nutempkite kitą failą — pakeis dabartinį</p>
+            <p className="invoice-drop-hint">Kitą failą galite įkelti iš naujo arba pašalinti × viršuje</p>
           ) : null}
         </section>
 

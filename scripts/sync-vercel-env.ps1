@@ -20,10 +20,24 @@ Get-Content ".env.local" | ForEach-Object {
   $vars[$name] = $value
 }
 
-$sensitive = @("SUPABASE_SERVICE_ROLE_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY")
+$sensitive = @("SUPABASE_SERVICE_ROLE_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY", "OPENAI_API_KEY", "AI_GATEWAY_API_KEY", "CRON_SECRET", "RESEND_API_KEY")
+$optionalKeys = @(
+  "NEXT_PUBLIC_SUPABASE_URL",
+  "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "NEXT_PUBLIC_APP_URL",
+  "ALLOW_DIRECT_LOGIN",
+  "OPENAI_API_KEY",
+  "AI_GATEWAY_API_KEY",
+  "INVOICE_OCR_MODEL",
+  "RESEND_API_KEY",
+  "EMAIL_FROM",
+  "CRON_SECRET"
+)
 
 foreach ($target in @("production", "preview", "development")) {
-  foreach ($name in $vars.Keys) {
+  foreach ($name in $optionalKeys) {
+    if (-not $vars.ContainsKey($name)) { continue }
     $value = $vars[$name]
     if ($name -eq "NEXT_PUBLIC_APP_URL" -and $target -in @("production", "preview")) {
       $value = $productionUrl

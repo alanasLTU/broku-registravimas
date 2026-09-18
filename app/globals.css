@@ -1495,6 +1495,8 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
 .invoice-list-drop-overlay small { color: #78827e; font-size: 13px; }
 .invoice-preview-image { width: 100%; max-height: 220px; object-fit: contain; border: 1px solid #e3e8e4; border-radius: 12px; background: #fafbfa; }
 .invoice-preview-wrap { position: relative; }
+.invoice-file-remove { top: 10px; right: 10px; width: 32px; height: 32px; border-radius: 10px; font-size: 18px; }
+.invoice-preview-pdf.invoice-preview-wrap { position: relative; padding-right: 48px; }
 .invoice-preview-dimmed { opacity: .45; filter: grayscale(.15); }
 .invoice-preview-loading {
   position: absolute;
