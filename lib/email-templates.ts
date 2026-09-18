@@ -131,6 +131,46 @@ export function buildRecordAssignedEmail(input: {
   return { subject, html, text };
 }
 
+export function buildRecordsDigestEmail(input: {
+  recipientName: string;
+  dateLabel: string;
+  entryCount: number;
+}) {
+  const subject = `Dienos suvestinė · įrašai · ${input.dateLabel}`;
+  const text = [
+    `Sveiki, ${input.recipientName}!`,
+    "",
+    `Vakar (${input.dateLabel}) objektuose užregistruota ${input.entryCount} pozicijų.`,
+    "Išsamus sąrašas su nuotraukomis pridedamas PDF priede.",
+  ].join("\n");
+  const html = layout("Dienos suvestinė · įrašai", `
+    <p>Sveiki, <strong>${input.recipientName}</strong>!</p>
+    <p>Vakar (<strong>${input.dateLabel}</strong>) objektuose užregistruota <strong>${input.entryCount}</strong> pozicijų.</p>
+    <p style="margin-top:18px;color:#69746f;font-size:13px;">Išsamus sąrašas su nuotraukomis pridedamas PDF priede.</p>
+  `);
+  return { subject, html, text };
+}
+
+export function buildInvoicesDigestEmail(input: {
+  dateLabel: string;
+  totalIncVat: string;
+}) {
+  const subject = `Dienos suvestinė · sąskaitos · ${input.dateLabel}`;
+  const text = [
+    `Sąskaitų suvestinė už ${input.dateLabel}.`,
+    `Iš viso su PVM: ${input.totalIncVat} €`,
+    "Detalus sąrašas pridedamas PDF priede.",
+  ].join("\n");
+  const html = layout("Dienos suvestinė · sąskaitos", `
+    <p>Sąskaitų suvestinė už <strong>${input.dateLabel}</strong>.</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0 8px;">
+      ${fieldRows([{ label: "Iš viso su PVM", value: `${input.totalIncVat} €` }])}
+    </table>
+    <p style="margin-top:18px;color:#69746f;font-size:13px;">Detalus sąrašas pridedamas PDF priede.</p>
+  `);
+  return { subject, html, text };
+}
+
 export async function sendEmail(payload: EmailPayload) {
   const apiKey = process.env.RESEND_API_KEY?.trim();
   const from = process.env.EMAIL_FROM?.trim();

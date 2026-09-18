@@ -2,7 +2,7 @@ import { createAdminSupabase } from "@/lib/supabase/admin";
 import { INVOICE_CATEGORY_LABELS } from "@/lib/constants";
 import { loadFirstPhotoByRecordId } from "@/lib/digest-media";
 import { buildInvoicesDigestPdf, buildRecordsDigestPdf } from "@/lib/digest-pdf";
-import { sendEmail } from "@/lib/email-templates";
+import { buildInvoicesDigestEmail, buildRecordsDigestEmail, sendEmail } from "@/lib/email-templates";
 import { formatMoneyFromCents, mapInvoice, sumInvoiceTotals, type InvoiceRow } from "@/lib/invoices";
 
 export const dynamic = "force-dynamic";
@@ -125,12 +125,14 @@ export async function GET(request: Request) {
       if (!sections.length) continue;
       const entryCount = sections.reduce((acc, section) => acc + section.entries.length, 0);
       const pdf = await buildRecordsDigestPdf({ dateLabel: window.label, sections });
-      const html = `<p>Sveiki, ${recipient.name}!</p><p>Vakar (${window.label}) objektuose užregistruota <strong>${entryCount}</strong> pozicijų.</p>`;
+      const template = buildRecordsDigestEmail({
+        recipientName: recipient.name,
+        dateLabel: window.label,
+        entryCount,
+      });
       const result = await sendEmail({
         to: [recipient.email],
-        subject: `Dienos suvestinė · įrašai · ${window.label}`,
-        html,
-        text: `Vakar užregistruota ${entryCount} pozicijų.`,
+        ...template,
         attachments: [{ filename: `irrasai-${window.label.replace(/\s+/g, "-")}.pdf`, content: pdf.toString("base64") }],
       });
       if (result.sent) sent += 1;
@@ -167,12 +169,13 @@ export async function GET(request: Request) {
     }
 
     for (const email of digestRecipients) {
-      const html = `<p>Sąskaitų suvestinė už ${window.label}.</p><p>Iš viso su PVM: <strong>${formatMoneyFromCents(grandTotal.incVat)} €</strong></p>`;
+      const template = buildInvoicesDigestEmail({
+        dateLabel: window.label,
+        totalIncVat: formatMoneyFromCents(grandTotal.incVat),
+      });
       const result = await sendEmail({
         to: [email],
-        subject: `Dienos suvestinė · sąskaitos · ${window.label}`,
-        html,
-        text: `Sąskaitų suvestinė. Viso su PVM: ${formatMoneyFromCents(grandTotal.incVat)} €`,
+        ...template,
         attachments: [{ filename: `saskaitos-${window.label.replace(/\s+/g, "-")}.pdf`, content: pdf.toString("base64") }],
       });
       if (result.sent) sent += 1;
