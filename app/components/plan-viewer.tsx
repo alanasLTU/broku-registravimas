@@ -44,6 +44,8 @@ type Props = {
   finalizeSaveLabel?: string;
   onFinalizeCapture?: (planId: string, x: number, y: number) => void | Promise<void>;
   onCancelFinalizeCapture?: () => void;
+  focusRecordId?: string | null;
+  onFocusHandled?: () => void;
 };
 
 export default function PlanViewer({
@@ -66,6 +68,8 @@ export default function PlanViewer({
   finalizeSaveLabel = "Išsaugoti",
   onFinalizeCapture,
   onCancelFinalizeCapture,
+  focusRecordId = null,
+  onFocusHandled,
 }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -88,6 +92,7 @@ export default function PlanViewer({
   const [imageSize, setImageSize] = useState({ w: 1, h: 1 });
 
   const activePlan = plans.find((item) => item.id === activePlanId) ?? plans[0] ?? null;
+  const pendingFocusRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!plans.length) {
@@ -98,10 +103,62 @@ export default function PlanViewer({
   }, [plans, activePlanId]);
 
   useEffect(() => {
-    setSelectedId(null);
+    if (!focusRecordId) return;
+    pendingFocusRef.current = focusRecordId;
+    const record = records.find((item) => item.id === focusRecordId);
+    if (!record?.planId || record.planX == null || record.planY == null) return;
+    setActivePlanId(record.planId);
+    setSelectedId(record.id);
     setDrop(null);
     setAttachQuery("");
-  }, [activePlanId]);
+  }, [focusRecordId, records]);
+
+  function focusOnPlanPoint(planX: number, planY: number, size = imageSize) {
+    const box = viewportRef.current;
+    if (!box || !size.w || !size.h) return;
+    const cw = box.clientWidth;
+    const ch = box.clientHeight;
+    const targetScale = clampScale(fitScaleRef.current * 2.8);
+    const nextTx = cw / 2 - planX * size.w * targetScale;
+    const nextTy = ch / 2 - planY * size.h * targetScale;
+    viewState.current = { scale: targetScale, tx: nextTx, ty: nextTy };
+    setScale(targetScale);
+    setTx(nextTx);
+    setTy(nextTy);
+  }
+
+  function applyFocusToRecord(recordId: string, size = imageSize) {
+    const record = records.find((item) => item.id === recordId && item.planId === activePlan?.id);
+    if (!record || record.planX == null || record.planY == null || size.w <= 1 || size.h <= 1) return false;
+    focusOnPlanPoint(record.planX, record.planY, size);
+    setSelectedId(record.id);
+    pendingFocusRef.current = null;
+    if (focusRecordId === recordId) onFocusHandled?.();
+    return true;
+  }
+
+  function tryApplyPendingFocus(size = imageSize) {
+    const targetId = pendingFocusRef.current ?? focusRecordId ?? selectedId;
+    if (!targetId) return false;
+    return applyFocusToRecord(targetId, size);
+  }
+
+  useEffect(() => {
+    if (!focusRecordId && !pendingFocusRef.current) return;
+    if (tryApplyPendingFocus()) return;
+    const targetId = pendingFocusRef.current ?? focusRecordId;
+    if (!targetId) return;
+    const record = records.find((item) => item.id === targetId);
+    if (record?.planId && record.planId !== activePlan?.id) setActivePlanId(record.planId);
+  }, [focusRecordId, activePlan?.id, imageSize.w, imageSize.h, records]);
+
+  function switchPlanTab(planId: string) {
+    pendingFocusRef.current = null;
+    setDrop(null);
+    setAttachQuery("");
+    setSelectedId(null);
+    setActivePlanId(planId);
+  }
 
   const pins = useMemo(
     () => records.filter((item) => item.planId === activePlan?.id && item.planX != null && item.planY != null),
@@ -407,7 +464,7 @@ export default function PlanViewer({
               type="button"
               role="tab"
               className={plan.id === activePlan?.id ? "plan-tab-active" : ""}
-              onClick={() => setActivePlanId(plan.id)}
+              onClick={() => switchPlanTab(plan.id)}
             >
               {plan.title}
             </button>
@@ -437,7 +494,14 @@ export default function PlanViewer({
               src={activePlan.fileUrl}
               alt={activePlan.title}
               draggable={false}
-              onLoad={(event) => fitImage(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight)}
+              onLoad={(event) => {
+                const width = event.currentTarget.naturalWidth;
+                const height = event.currentTarget.naturalHeight;
+                fitImage(width, height);
+                window.requestAnimationFrame(() => {
+                  tryApplyPendingFocus({ w: width, h: height });
+                });
+              }}
             />
             {pins.map((pin) => (
               <button
@@ -460,7 +524,9 @@ export default function PlanViewer({
                   setSelectedId(pin.id);
                 }}
                 aria-label={`${pin.code} ${pin.title}`}
-              />
+              >
+                {selectedId === pin.id ? <span className="plan-pin-label">{pin.code}</span> : null}
+              </button>
             ))}
             {drop ? (
               <span className="plan-drop-mark" style={{ left: `${drop.x * 100}%`, top: `${drop.y * 100}%` }} />
@@ -510,7 +576,9 @@ export default function PlanViewer({
           <span>{selected.room || "Be patalpos"} · {selected.status}</span>
           {selected.photoUrl ? (
             <button type="button" className="plan-pin-card-photo" onClick={() => onOpenRecord(selected.id)}>
-              <img src={selected.photoThumbUrl || selected.photoUrl} alt={`${selected.code} nuotrauka`} loading="lazy" decoding="async" />
+              <div className="plan-pin-card-photo-thumb">
+                <img src={selected.photoThumbUrl || selected.photoUrl} alt={`${selected.code} nuotrauka`} loading="lazy" decoding="async" />
+              </div>
               <span>Peržiūrėti įrašą</span>
             </button>
           ) : (

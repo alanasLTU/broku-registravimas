@@ -1166,6 +1166,7 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   .detail-drawer { bottom: 0; top: auto; width: 100%; height: min(92dvh, 780px); border-radius: 18px 18px 0 0; animation-name: slideUp; overflow: hidden; }
   .drawer-media-actions { grid-template-columns: 1fr 1fr; }
   .drawer-media-actions label { min-height: 44px; font-size: 13px; }
+  .drawer-plan-link .add-issue-button { min-height: 44px; font-size: 13px; }
   .drawer-footer { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
   .drawer-footer button { min-height: 44px; flex: 1; }
   .photo-editor-layer { align-items: flex-end; padding: 0; }
@@ -1421,6 +1422,8 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
 .contact-suggestions button:hover { background: #f3f6f4; }
 .detail-core-fields { margin: 12px 0; }
 .detail-created-by { margin: 8px 0 0; color: #69746f; font-size: 12px; }
+.drawer-plan-link { padding: 10px 12px 0; }
+.drawer-plan-link .add-issue-button { margin-top: 0; min-height: 42px; font-size: 12px; }
 .detail-history, .detail-linked-tasks { margin-top: 16px; }
 .detail-history summary { cursor: pointer; font-weight: 700; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .detail-history summary::-webkit-details-marker { display: none; }
@@ -2013,7 +2016,32 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   touch-action: manipulation;
   pointer-events: auto;
 }
-.plan-pin-active { box-shadow: 0 0 0 4px rgba(255,255,255,.35), 0 2px 8px rgba(0,0,0,.35); }
+.plan-pin-active {
+  animation: plan-pin-pulse 1.1s ease-out 2;
+  box-shadow: 0 0 0 4px rgba(255,255,255,.45), 0 0 0 8px rgba(47,122,88,.28), 0 2px 10px rgba(0,0,0,.4);
+  z-index: 4;
+}
+.plan-pin-label {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(17, 27, 23, 0.92);
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0,0,0,.28);
+}
+@keyframes plan-pin-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(47,122,88,.55), 0 2px 10px rgba(0,0,0,.4); }
+  70% { box-shadow: 0 0 0 14px rgba(47,122,88,0), 0 2px 10px rgba(0,0,0,.4); }
+  100% { box-shadow: 0 0 0 4px rgba(255,255,255,.45), 0 0 0 8px rgba(47,122,88,.28), 0 2px 10px rgba(0,0,0,.4); }
+}
 .plan-drop-mark {
   position: absolute;
   width: 16px;
@@ -2095,14 +2123,20 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   text-align: left;
   cursor: pointer;
 }
-.plan-pin-card-photo img {
-  display: block;
+.plan-pin-card-photo-thumb {
   width: 100%;
+  aspect-ratio: 16 / 10;
   max-height: 140px;
   border-radius: 12px;
-  object-fit: cover;
+  overflow: hidden;
   background: #edf0ee;
   box-shadow: inset 0 0 0 1px rgba(0,0,0,.06);
+}
+.plan-pin-card-photo-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .plan-pin-card-photo span { color: #5f7569; font-size: 11px; font-weight: 700; }
 .plan-pin-card-no-photo { margin: 2px 0 0; color: #9aa39f; font-size: 11px; }
@@ -2146,6 +2180,29 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   cursor: pointer;
 }
 .plan-viewer-head { position: relative; z-index: 3; }
+
+@media (min-width: 761px) {
+  .plan-pin-card, .plan-sheet {
+    left: auto;
+    right: 20px;
+    bottom: 68px;
+    width: min(360px, calc(100vw - 40px));
+  }
+  .plan-pin-card-photo {
+    grid-template-columns: 96px 1fr;
+    align-items: center;
+    column-gap: 12px;
+  }
+  .plan-pin-card-photo-thumb {
+    width: 96px;
+    height: 96px;
+    max-height: none;
+    aspect-ratio: 1;
+  }
+  .plan-pin-card-photo span {
+    font-size: 12px;
+  }
+}
 
 @media print {
   .print-invoice-report { display: block !important; }

@@ -65,3 +65,7 @@ export function clampPlanCoord(value: number) {
   if (!Number.isFinite(value)) return 0.5;
   return Math.min(0.995, Math.max(0.005, value));
 }
+
+export function recordHasPlanPin(record: { planId?: string | null; planX?: number | null; planY?: number | null }) {
+  return Boolean(record.planId && record.planX != null && record.planY != null);
+}

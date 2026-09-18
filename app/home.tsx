@@ -28,6 +28,7 @@ import { imageTooLarge, isImageFile, isVideoFile, mediaFileName, mimeOf, pickInv
 import type { RegisterPayload } from "@/lib/register-data";
 import { formatMoneyEuro, matchesInvoiceSearch, type Invoice } from "@/lib/invoices";
 import type { ProjectPlan } from "@/lib/plans";
+import { recordHasPlanPin } from "@/lib/plans";
 
 type Status = typeof statusList[number];
 type Priority = "Kritinis" | "Aukštas" | "Vidutinis" | "Žemas";
@@ -380,6 +381,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const [invoices, setInvoices] = useState<Invoice[]>(() => initialData?.invoices ?? []);
   const [invoiceReportOpen, setInvoiceReportOpen] = useState(false);
   const [planViewerOpen, setPlanViewerOpen] = useState(false);
+  const [planFocusRecordId, setPlanFocusRecordId] = useState<string | null>(null);
   const [planPickForCapture, setPlanPickForCapture] = useState(false);
   const [captureFinalizeOnMap, setCaptureFinalizeOnMap] = useState(false);
   const [projectPlans, setProjectPlans] = useState<ProjectPlan[]>([]);
@@ -917,6 +919,7 @@ export default function Home({ initialData = null }: HomeProps) {
     () => completionApprovers.map((item) => PROJECT_CONTACT_ROLE_LABELS[item.role as ProjectContactRole] ?? item.role).join(", "),
     [completionApprovers],
   );
+  const detailHasPlanPin = Boolean(detail && recordHasPlanPin(detail));
   const canApproveCompletionRequest = Boolean(
     detailPending
     && profile
@@ -971,6 +974,23 @@ export default function Home({ initialData = null }: HomeProps) {
     }
     setPlanPickForCapture(false);
     setCaptureFinalizeOnMap(false);
+    setPlanFocusRecordId(null);
+    setPlanViewerOpen(true);
+  }
+
+  function openRecordOnPlan(record: Defect) {
+    if (!recordHasPlanPin(record)) {
+      showToast("Šis įrašas dar nepažymėtas plane.");
+      return;
+    }
+    if (!projectPlans.length) {
+      showToast("Šiam objektui dar nėra plano.");
+      return;
+    }
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
+    setPlanFocusRecordId(record.id);
+    setDetailId(null);
     setPlanViewerOpen(true);
   }
 
@@ -995,6 +1015,7 @@ export default function Home({ initialData = null }: HomeProps) {
 
   function closePlanViewer() {
     setPlanViewerOpen(false);
+    setPlanFocusRecordId(null);
     if (captureFinalizeOnMap) {
       setPlanPickForCapture(false);
       setCaptureFinalizeOnMap(false);
@@ -2645,6 +2666,8 @@ export default function Home({ initialData = null }: HomeProps) {
           onOpenRecord={(id) => {
             setDetailId(id);
           }}
+          focusRecordId={planFocusRecordId}
+          onFocusHandled={() => setPlanFocusRecordId(null)}
           showToast={showToast}
         />
       ) : null}
@@ -2983,6 +3006,13 @@ export default function Home({ initialData = null }: HomeProps) {
             }}
             onDrop={handleMorePhotoDrop}
           >
+            {detailHasPlanPin ? (
+              <div className="drawer-plan-link">
+                <button type="button" className="add-issue-button add-issue-button-emphasis" onClick={() => openRecordOnPlan(detail)}>
+                  ⌖ Peržiūrėti žemėlapyje
+                </button>
+              </div>
+            ) : null}
             {detailMedia.length ? (
               <div className="drawer-thumbs">
                 {detailMedia.map((item, index) => (
