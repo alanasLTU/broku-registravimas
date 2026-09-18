@@ -16,7 +16,8 @@ export type ReportFieldKey =
   | "notes"
   | "commercial"
   | "resolution"
-  | "createdBy";
+  | "createdBy"
+  | "linkedTasks";
 
 export type ReportOptions = Record<ReportFieldKey, boolean>;
 
@@ -36,6 +37,7 @@ export const DEFAULT_REPORT_OPTIONS: ReportOptions = {
   commercial: true,
   resolution: true,
   createdBy: true,
+  linkedTasks: true,
 };
 
 export const REPORT_OPTION_LABELS: Record<ReportFieldKey, string> = {
@@ -54,6 +56,7 @@ export const REPORT_OPTION_LABELS: Record<ReportFieldKey, string> = {
   commercial: "Kaina ir kas paprašė",
   resolution: "Sprendimas / atlikti darbai",
   createdBy: "Kas užregistravo",
+  linkedTasks: "Susijusios užduotys",
 };
 
 type ReportRecord = {
@@ -76,6 +79,7 @@ type ReportRecord = {
   createdByName?: string;
   createdByEmail?: string;
   items?: Array<{ issue: string; requiredWork: string }>;
+  childTasks?: Array<{ code: string; title: string; status: string }>;
 };
 
 export function formatReportLocation(record: ReportRecord) {

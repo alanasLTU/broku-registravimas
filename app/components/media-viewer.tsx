@@ -5,6 +5,7 @@ import { useEffect, useRef, type TouchEvent } from "react";
 export type MediaViewerItem = {
   id: string;
   url: string;
+  thumbUrl?: string;
   kind: "photo" | "video";
   caption?: string;
   fileName?: string;

@@ -1,5 +1,6 @@
 import { locationLabel } from "@/lib/auth";
-import { MEDIA_BUCKET, normalizeStatus } from "@/lib/constants";
+import { normalizeStatus, isRecordCompleted } from "@/lib/constants";
+import { mediaProxyUrl, mediaThumbUrl } from "@/lib/media-url";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type RecordRow = {
@@ -18,6 +19,7 @@ export type RecordRow = {
   assignee: string;
   executor?: string;
   supervisor_id?: string | null;
+  supervisor_name?: string | null;
   parent_record_id?: string | null;
   due_date: string | null;
   requested_by: string;
@@ -41,48 +43,39 @@ type MediaRow = {
   id: string;
   record_id: string;
   object_key: string;
+  thumb_object_key?: string | null;
   file_name: string;
   mime_type: string;
   media_kind: string;
-  caption: string;
+  caption?: string;
 };
 
-export async function mapRecord(
-  supabase: SupabaseClient,
+function mapMedia(recordId: string, media: MediaRow[]) {
+  return media.map((row) => {
+    const isVideo = row.media_kind === "video";
+    const hasThumb = Boolean(row.thumb_object_key);
+    return {
+      id: row.id,
+      url: mediaProxyUrl(recordId, row.id),
+      thumbUrl: !isVideo && hasThumb ? mediaThumbUrl(recordId, row.id) : undefined,
+      caption: row.caption ?? "",
+      kind: isVideo ? "video" : "photo",
+      fileName: row.file_name,
+      objectKey: row.object_key,
+    };
+  });
+}
+
+export function mapRecord(
   record: RecordRow,
   items: ItemRow[],
   media: MediaRow[],
   extras?: {
     supervisorName?: string;
     childTasks?: Array<{ id: string; code: string; title: string; status: string }>;
-    /** List bootstrap: skip Storage signed-URL roundtrips; use proxy paths. */
-    deferSignedUrls?: boolean;
   },
 ) {
-  const signed = await Promise.all(
-    media.map(async (row) => {
-      const proxyUrl = `/api/media/${record.id}/${row.id}`;
-      if (extras?.deferSignedUrls) {
-        return {
-          id: row.id,
-          url: proxyUrl,
-          caption: row.caption,
-          kind: row.media_kind === "video" ? "video" : "photo",
-          fileName: row.file_name,
-          objectKey: row.object_key,
-        };
-      }
-      const { data } = await supabase.storage.from(MEDIA_BUCKET).createSignedUrl(row.object_key, 60 * 60 * 12);
-      return {
-        id: row.id,
-        url: data?.signedUrl ?? proxyUrl,
-        caption: row.caption,
-        kind: row.media_kind === "video" ? "video" : "photo",
-        fileName: row.file_name,
-        objectKey: row.object_key,
-      };
-    }),
-  );
+  const signed = mapMedia(record.id, media);
   const photos = signed.filter((item) => item.kind === "photo");
   const videos = signed.filter((item) => item.kind === "video");
   const itemList = items.map((row) => ({ id: row.id, issue: row.issue, requiredWork: row.required_work }));
@@ -106,7 +99,7 @@ export async function mapRecord(
     assignee: record.assignee || "—",
     executor: record.executor || "",
     supervisorId: record.supervisor_id ?? null,
-    supervisorName: extras?.supervisorName ?? "",
+    supervisorName: record.supervisor_name?.trim() || extras?.supervisorName || "",
     due: record.due_date ?? "Nenustatyta",
     requestedBy: record.requested_by,
     price: record.price_cents === null ? "" : (record.price_cents / 100).toFixed(2),
@@ -144,18 +137,19 @@ export async function fetchRecordBundle(supabase: SupabaseClient, recordId: stri
   ]);
 
   return mapRecord(
-    supabase,
     record as RecordRow,
     items ?? [],
     media ?? [],
     {
-      supervisorName: supervisor.data?.display_name ?? "",
-      childTasks: (children ?? []).map((child) => ({
-        id: child.id,
-        code: child.code,
-        title: child.title,
-        status: normalizeStatus(child.status),
-      })),
+      supervisorName: (record as RecordRow).supervisor_name?.trim() || supervisor.data?.display_name || "",
+      childTasks: (children ?? [])
+        .filter((child) => !isRecordCompleted(child))
+        .map((child) => ({
+          id: child.id,
+          code: child.code,
+          title: child.title,
+          status: normalizeStatus(child.status),
+        })),
     },
   );
 }

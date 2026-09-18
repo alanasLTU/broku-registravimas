@@ -210,14 +210,16 @@ export default function PhotoEditor({ sourceUrl, fileName, saving, onClose, onSa
           </div>
         </div>
         <div className="photo-editor-stage">
-          <canvas
-            ref={canvasRef}
-            onPointerDown={startDrawing}
-            onPointerMove={continueDrawing}
-            onPointerUp={(event) => finishDrawing(event)}
-            onPointerCancel={(event) => finishDrawing(event, false)}
-            aria-label="Redaguojama nuotrauka"
-          />
+          <div className="photo-editor-canvas-wrap">
+            <canvas
+              ref={canvasRef}
+              onPointerDown={startDrawing}
+              onPointerMove={continueDrawing}
+              onPointerUp={(event) => finishDrawing(event)}
+              onPointerCancel={(event) => finishDrawing(event, false)}
+              aria-label="Redaguojama nuotrauka"
+            />
+          </div>
           {!ready && <div className="photo-editor-loading">{loadError || "Atidaroma nuotrauka…"}</div>}
         </div>
         <footer className="photo-editor-actions">

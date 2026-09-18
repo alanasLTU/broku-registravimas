@@ -5,6 +5,7 @@ export type EmailPayload = {
   subject: string;
   html: string;
   text: string;
+  attachments?: Array<{ filename: string; content: string }>;
 };
 
 function appUrl() {
@@ -149,6 +150,7 @@ export async function sendEmail(payload: EmailPayload) {
       subject: payload.subject,
       html: payload.html,
       text: payload.text,
+      attachments: payload.attachments,
     }),
   });
   if (!response.ok) {

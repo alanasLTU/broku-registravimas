@@ -9,12 +9,12 @@ Nieko neveikia, kol nėra raktų. Kodas jau paruoštas Next.js / Vercel.
    `supabase/migrations/20260825120000_init.sql` → Run.
 3. **Authentication → Providers → Email**: įjungti magic link / OTP.
 4. **Authentication → URL Configuration**
-   - Site URL: `http://localhost:3000` (vėliau `https://brokai.distyle.lt`)
+   - Site URL: `http://localhost:3000` (produkcija `https://brokai.digroup.lt`)
    - Redirect URLs:
      - `http://localhost:3000/auth/callback`
      - `http://localhost:3000/**`
      - `https://<jūsų>.vercel.app/auth/callback`
-     - `https://brokai.distyle.lt/auth/callback` (kai bus DNS)
+     - `https://brokai.digroup.lt/auth/callback`
 5. **Settings → API** nukopijuoti:
    - Project URL
    - `anon` `public` key
@@ -49,7 +49,7 @@ Atidaryti http://localhost:3000 → login → magic link.
 
 1. Importuoti Git repo (arba `vercel` CLI).
 2. Tie patys env vars (Production + Preview).
-3. Domain: `brokai.distyle.lt` → CNAME į `cname.vercel-dns.com`.
+3. Domain: `brokai.digroup.lt` → CNAME į `cname.vercel-dns.com`.
 4. Supabase Redirect URLs papildyti produkcijos adresu.
 
 ## 4. Kaip naudoti

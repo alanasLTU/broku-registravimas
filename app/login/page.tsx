@@ -3,7 +3,7 @@ import { supabaseConfigured } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
-export default async function LoginPage({ searchParams }: { searchParams: Promise<{ invite?: string; join?: string; error?: string }> }) {
+export default async function LoginPage({ searchParams }: { searchParams: Promise<{ invite?: string; join?: string; error?: string; email?: string }> }) {
   const params = await searchParams;
   const configured = supabaseConfigured();
   const guestFlow = Boolean(params.invite || params.join);
@@ -23,7 +23,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
               <p>Prisijunkite el. paštu ir slaptažodžiu. Nauji klientai / komanda: Argintas sukuria paskyrą arba atsiunčia objekto nuorodą — registracija vyksta be laiškų.</p>
             )}
             {params.error ? <p className="login-error">{params.error}</p> : null}
-            <LoginForm invite={params.invite ?? ""} join={params.join ?? ""} />
+            <LoginForm invite={params.invite ?? ""} join={params.join ?? ""} email={params.email ?? ""} />
             <noscript>
               <p className="login-error">Telefone reikia JavaScript. Jei mygtukas nereaguoja, perkraukite puslapį tame pačiame Wi‑Fi.</p>
             </noscript>

@@ -2,9 +2,9 @@
 
 import { FormEvent, useState } from "react";
 
-export default function LoginForm({ invite, join }: { invite: string; join: string }) {
+export default function LoginForm({ invite, join, email: emailFromLink = "" }: { invite: string; join: string; email?: string }) {
   const guestFlow = Boolean(invite || join);
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(emailFromLink);
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "working" | "error">("idle");
   const [message, setMessage] = useState("");

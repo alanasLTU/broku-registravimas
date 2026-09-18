@@ -5,15 +5,19 @@ import { useEffect, useMemo, useState } from "react";
 type RecordThumbProps = {
   recordId: string;
   photoUrl?: string;
+  thumbUrl?: string;
   photoId?: string;
   videoUrl?: string;
   photoCount?: number;
   videoCount?: number;
   fallbackLabel: string;
   placeholderClass: string;
+  /** true = krauti tik miniatiūrą (mažas egress sąraše). */
+  preferThumb?: boolean;
 };
 
-function primaryThumbSrc(recordId: string, photoId?: string, photoUrl?: string) {
+function resolveThumbSrc(recordId: string, photoId?: string, photoUrl?: string, thumbUrl?: string, preferThumb = false) {
+  if (preferThumb) return thumbUrl || null;
   if (!photoUrl) return null;
   if (photoUrl.startsWith("blob:") || photoUrl.startsWith("data:")) return photoUrl;
   if (photoUrl.startsWith("http")) return photoUrl;
@@ -23,23 +27,22 @@ function primaryThumbSrc(recordId: string, photoId?: string, photoUrl?: string) 
   return photoUrl;
 }
 
-function fallbackThumbSrc(recordId: string, photoId?: string, current?: string | null) {
-  if (!photoId || photoId.startsWith("legacy-") || photoId.startsWith("local-")) return null;
-  const proxy = `/api/media/${recordId}/${photoId}`;
-  return current === proxy ? null : proxy;
-}
-
 export default function RecordThumb({
   recordId,
   photoUrl,
+  thumbUrl,
   photoId,
   videoUrl,
   photoCount = 0,
   videoCount = 0,
   fallbackLabel,
   placeholderClass,
+  preferThumb = false,
 }: RecordThumbProps) {
-  const initialSrc = useMemo(() => primaryThumbSrc(recordId, photoId, photoUrl), [recordId, photoId, photoUrl]);
+  const initialSrc = useMemo(
+    () => resolveThumbSrc(recordId, photoId, photoUrl, thumbUrl, preferThumb),
+    [preferThumb, recordId, photoId, photoUrl, thumbUrl],
+  );
   const [imageSrc, setImageSrc] = useState<string | null>(initialSrc);
   const [photoFailed, setPhotoFailed] = useState(false);
 
@@ -60,11 +63,6 @@ export default function RecordThumb({
           loading="lazy"
           decoding="async"
           onError={() => {
-            const next = fallbackThumbSrc(recordId, photoId, imageSrc);
-            if (next) {
-              setImageSrc(next);
-              return;
-            }
             setPhotoFailed(true);
             setImageSrc(null);
           }}

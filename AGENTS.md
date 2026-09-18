@@ -13,7 +13,7 @@ Vidinė Distyle programėlė objektuose fiksuoti:
 
 Orientuota į telefoną vietoje (foto, video, greitas „Naujas“). Vėliau — Odoo modulis (laukuose jau yra `odoo_id` kabliai, sinchronizacijos nėra).
 
-Planuojamas adresas: `brokai.distyle.lt` (Vercel custom domain). Git: `https://github.com/alanasLTU/broku-registravimas.git`
+Produkcijos adresas: `brokai.digroup.lt` (Vercel custom domain). Git: `https://github.com/alanasLTU/broku-registravimas.git`
 
 Sena versija buvo ChatGPT Sites + Cloudflare D1/R2 + vinext. **To nebenaudojame.**
 
@@ -45,6 +45,8 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 
 - `anon` — frontas ir serveris su RLS
 - `service_role` — **tik serveris** (direct login, profilio sukūrimas). Niekada `NEXT_PUBLIC_` ir niekada į chatą
+- **Resend:** `RESEND_API_KEY` + `EMAIL_FROM` (patvirtintas domenas). Be jų laiškai ne siunčiami — tik `[email:preview]` log'e. Patikra: `GET /api/email` → `{ configured: true }`
+- **OCR:** `OPENAI_API_KEY` arba `AI_GATEWAY_API_KEY` (neprivaloma)
 - Vercel Production: tie patys kintamieji + `NEXT_PUBLIC_APP_URL=https://...`
 - Tiesioginis prisijungimas be laiško: `NODE_ENV !== production` **arba** `ALLOW_DIRECT_LOGIN=true`
 
@@ -150,6 +152,13 @@ Senos `/api/photos` ir D1/R2 **išmestos**. UI vis dar vadina „defects“, DB 
 - Odoo: nerašyti sinchronizacijos, kol nepaprašyta; naudoti esamus `odoo_*` laukus
 - Git: commitinti tik kai paprašo vartotojas; force push į main — ne
 
+## Sąskaitos ir narystė
+
+- Sąskaitos (`invoices`) — atskira lentelė, ne `records`. Staff fiksuoja per **+ → Sąskaita**; klientas nemato.
+- Matomumas: **admin / super admin** — visi projektai; kiti (įsk. staff) — tik `project_members`.
+- Migracija: `supabase/migrations/20260917140000_invoices_and_assignments.sql` (seed staff į esamus projektus).
+- Dienos suvestinės: Vercel cron `0 7 * * *` UTC ≈ 10:00 LT → `/api/cron/daily-digest` (`CRON_SECRET`).
+
 ## Žinomos duobės (jau kimštos)
 
 1. Prisijungimas **prieš** SQL → nėra `profiles` → 401 → login ciklas. Sprendimas: `requireUser` + service role upsert, ir **nedaryti** `window.location = /login` iš `/api/register` 401.
@@ -161,5 +170,5 @@ Senos `/api/photos` ir D1/R2 **išmestos**. UI vis dar vadina „defects“, DB 
 
 1. GitHub repo prijungti prie Vercel, framework Next.js
 2. Env vars kaip `.env.local`
-3. Domain `brokai.distyle.lt` → CNAME `cname.vercel-dns.com`
+3. Domain `brokai.digroup.lt` → CNAME `cname.vercel-dns.com`
 4. Supabase Redirect URLs papildyti produkcijos `/auth/callback` (kai vėl įjungsime laiškus)

@@ -1,7 +1,8 @@
 import { apiError, requirePermission, requireUser } from "@/lib/auth";
 import { isClientRecordType, isRecordType, recordPrefixes, responsibilities, priorities } from "@/lib/constants";
+import { maybeNotifyResponsible } from "@/lib/email";
 import { asUuid } from "@/lib/ids";
-import { fetchRecordBundle } from "@/lib/map-record";
+import { fetchRecordBundle, type RecordRow } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
 
@@ -84,6 +85,7 @@ export async function POST(request: Request) {
       assignee: String(payload.assignee ?? "").trim().slice(0, 120),
       executor: String(payload.executor ?? "").trim().slice(0, 120),
       supervisor_id: typeof payload.supervisorId === "string" && payload.supervisorId ? asUuid(payload.supervisorId) : null,
+      supervisor_name: typeof payload.supervisorName === "string" ? payload.supervisorName.trim().slice(0, 120) : "",
       due_date: (() => {
         const value = String(payload.due ?? "").trim();
         return !value || value === "Nenustatyta" ? null : value;
@@ -126,7 +128,10 @@ export async function POST(request: Request) {
     });
 
     const mapped = await fetchRecordBundle(supabase, id);
-    return Response.json({ defect: mapped }, { status: 201 });
+    const email = insert.notify_responsible
+      ? await maybeNotifyResponsible(supabase, record as RecordRow)
+      : null;
+    return Response.json({ defect: mapped, email }, { status: 201 });
   } catch (error) {
     return apiError(error);
   }

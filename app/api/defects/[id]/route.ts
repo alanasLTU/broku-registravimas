@@ -57,6 +57,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (typeof payload.supervisorId === "string") {
       updates.supervisor_id = payload.supervisorId.trim() ? asUuid(payload.supervisorId) : null;
     }
+    if (typeof payload.supervisorName === "string") {
+      updates.supervisor_name = payload.supervisorName.trim().slice(0, 120);
+      updates.supervisor_id = null;
+    }
     if (typeof payload.due === "string") updates.due_date = payload.due && payload.due !== "Nenustatyta" ? payload.due : null;
     if (typeof payload.archived === "boolean") {
       updates.archived = payload.archived;
@@ -125,20 +129,30 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
-    const { supabase, profile } = await requireUser();
-    requirePermission(profile, "delete_records");
+    const { supabase, admin, profile } = await requireUser();
 
-    const { data: record } = await supabase.from("records").select("id, project_id").eq("id", id).maybeSingle();
+    const { data: record } = await supabase.from("records").select("id, project_id, parent_record_id").eq("id", id).maybeSingle();
     if (!record) return Response.json({ error: "Įrašas nerastas." }, { status: 404 });
 
-    const { data: media } = await supabase.from("record_media").select("object_key").eq("record_id", id);
-    const keys = (media ?? []).map((row) => row.object_key).filter(Boolean);
-    if (keys.length) {
-      await supabase.storage.from(MEDIA_BUCKET).remove(keys);
+    if (record.parent_record_id) {
+      requirePermission(profile, "edit_records");
+    } else {
+      requirePermission(profile, "delete_records");
     }
 
-    const { error } = await supabase.from("records").delete().eq("id", id);
+    const db = admin ?? supabase;
+
+    const { data: media } = await db.from("record_media").select("object_key, thumb_object_key").eq("record_id", id);
+    const keys = (media ?? []).flatMap((row) => [row.object_key, row.thumb_object_key].filter(Boolean)) as string[];
+    if (keys.length) {
+      await db.storage.from(MEDIA_BUCKET).remove(keys);
+    }
+
+    const { data: deleted, error } = await db.from("records").delete().eq("id", id).select("id");
     if (error) throw error;
+    if (!deleted?.length) {
+      return Response.json({ error: "Nepavyko ištrinti įrašo iš duomenų bazės." }, { status: 500 });
+    }
 
     return Response.json({ ok: true });
   } catch (error) {

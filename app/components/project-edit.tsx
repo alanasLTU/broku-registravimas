@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { PROJECT_CONTACT_ROLE_LABELS, projectStatuses, type ProjectStatus } from "@/lib/constants";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import PhoneInput from "./phone-input";
+import { PROJECT_CONTACT_ROLE_LABELS, projectStatuses, type ProjectContactRole, type ProjectStatus } from "@/lib/constants";
 
 type Project = {
   id: string;
@@ -10,7 +11,18 @@ type Project = {
   status?: ProjectStatus;
 };
 
-type ContactRow = {
+type StructuredContact = {
+  role: ProjectContactRole;
+  profileId: string;
+  name: string;
+  phone: string;
+  email: string;
+  contactId?: string;
+  notifyEmail: boolean;
+  manual: boolean;
+};
+
+type OtherContact = {
   role: string;
   name: string;
   phone: string;
@@ -20,91 +32,242 @@ type ContactRow = {
   contactId?: string;
 };
 
-const ROLE_SUGGESTIONS = Object.entries(PROJECT_CONTACT_ROLE_LABELS).map(([value, label]) => ({ value, label }));
+type StaffUser = { id: string; display_name: string; email: string; phone?: string };
 
-function roleLabel(role: string) {
-  return PROJECT_CONTACT_ROLE_LABELS[role as keyof typeof PROJECT_CONTACT_ROLE_LABELS] ?? role;
-}
+type CurrentUser = {
+  id: string;
+  displayName: string;
+  email: string;
+  phone: string;
+};
 
-function filteredRoleSuggestions(query: string) {
-  const term = query.trim().toLocaleLowerCase("lt");
-  if (!term) return ROLE_SUGGESTIONS;
-  return ROLE_SUGGESTIONS.filter((item) => item.label.toLocaleLowerCase("lt").includes(term));
-}
-
-function blankContact(): ContactRow {
-  return { role: "", name: "", phone: "", email: "", category: "", workScope: "" };
-}
+const STRUCTURED_ROLES: ProjectContactRole[] = ["project_manager", "coordinator", "works_manager"];
 
 type Props = {
   project: Project;
   saving: boolean;
+  currentUser: CurrentUser;
   onClose: () => void;
-  onSave: (payload: { name: string; address: string; status: ProjectStatus; contacts: ContactRow[] }) => Promise<void>;
+  onOpenProfile: () => void;
+  onSave: (payload: {
+    name: string;
+    address: string;
+    status: ProjectStatus;
+    contacts: Array<{
+      role: string;
+      name: string;
+      phone: string;
+      email: string;
+      category: string;
+      workScope: string;
+      contactId?: string;
+      profileId?: string;
+      notifyEmail?: boolean;
+    }>;
+  }) => Promise<void>;
   onDelete: () => void;
 };
 
-export default function ProjectEdit({ project, saving, onClose, onSave, onDelete }: Props) {
+function blankStructured(role: ProjectContactRole): StructuredContact {
+  return {
+    role,
+    profileId: "",
+    name: "",
+    phone: "",
+    email: "",
+    notifyEmail: role !== "works_manager",
+    manual: true,
+  };
+}
+
+function blankOther(): OtherContact {
+  return { role: "", name: "", phone: "", email: "", category: "", workScope: "" };
+}
+
+function staffSnapshot(user: StaffUser | CurrentUser, currentUser: CurrentUser) {
+  const id = user.id;
+  const name = "display_name" in user ? user.display_name : user.displayName;
+  const email = user.email || (id === currentUser.id ? currentUser.email : "");
+  let phone = user.phone?.trim() ?? "";
+  if (!phone && id === currentUser.id) phone = currentUser.phone?.trim() ?? "";
+  return {
+    profileId: id,
+    name: name || (id === currentUser.id ? currentUser.displayName : "") || email,
+    phone,
+    email,
+    manual: false,
+  };
+}
+
+export default function ProjectEdit({ project, saving, currentUser, onClose, onOpenProfile, onSave, onDelete }: Props) {
   const [name, setName] = useState(project.name);
   const [address, setAddress] = useState(project.address ?? "");
   const [status, setStatus] = useState<ProjectStatus>(project.status ?? "Vykdomas");
-  const [contacts, setContacts] = useState<ContactRow[]>([]);
-  const [nameSuggestions, setNameSuggestions] = useState<Array<{ id: string; name: string; phone: string; email: string }>>([]);
-  const [activeNameSuggest, setActiveNameSuggest] = useState<number | null>(null);
-  const [activeRoleSuggest, setActiveRoleSuggest] = useState<number | null>(null);
+  const [structured, setStructured] = useState<StructuredContact[]>(STRUCTURED_ROLES.map(blankStructured));
+  const [others, setOthers] = useState<OtherContact[]>([]);
+  const [staffUsers, setStaffUsers] = useState<StaffUser[]>([]);
+
+  const staffOptions = useMemo(() => {
+    const map = new Map<string, StaffUser>();
+    if (currentUser.id) {
+      map.set(currentUser.id, {
+        id: currentUser.id,
+        display_name: currentUser.displayName || currentUser.email,
+        email: currentUser.email,
+        phone: currentUser.phone,
+      });
+    }
+    for (const user of staffUsers) {
+      const existing = map.get(user.id);
+      map.set(user.id, {
+        id: user.id,
+        display_name: user.display_name || existing?.display_name || "",
+        email: user.email || existing?.email || "",
+        phone: user.phone?.trim() || existing?.phone?.trim() || "",
+      });
+    }
+    return [...map.values()];
+  }, [currentUser, staffUsers]);
+
+  useEffect(() => {
+    if (!currentUser.phone?.trim()) return;
+    setStructured((items) => items.map((item) => (
+      item.profileId === currentUser.id && !item.phone.trim()
+        ? { ...item, phone: currentUser.phone.trim() }
+        : item
+    )));
+  }, [currentUser.id, currentUser.phone]);
+
+  useEffect(() => {
+    setStructured((items) => {
+      let changed = false;
+      const next = items.map((item) => {
+        if (!item.profileId || item.phone.trim()) return item;
+        const user = staffOptions.find((entry) => entry.id === item.profileId);
+        const phone = user?.phone?.trim() ?? "";
+        if (!phone) return item;
+        changed = true;
+        return { ...item, phone };
+      });
+      return changed ? next : items;
+    });
+  }, [staffOptions]);
 
   useEffect(() => {
     setName(project.name);
     setAddress(project.address ?? "");
     setStatus(project.status ?? "Vykdomas");
+    void fetch("/api/staff").then((response) => response.json()).then((payload: { users?: StaffUser[] }) => setStaffUsers(payload.users ?? [])).catch(() => setStaffUsers([]));
     void fetch(`/api/projects/${project.id}/contacts`)
       .then((response) => response.json())
-      .then((payload: { contacts?: Array<{ role: string; category: string; work_scope: string; contacts: { id: string; name: string; phone: string; email: string } | null }> }) => {
-        const rows = (payload.contacts ?? [])
-          .filter((item) => item.contacts)
-          .map((item) => ({
-            role: roleLabel(item.role),
-            name: item.contacts!.name,
-            phone: item.contacts!.phone ?? "",
-            email: item.contacts!.email ?? "",
+      .then((payload: {
+        contacts?: Array<{
+          role: string;
+          category: string;
+          work_scope: string;
+          notify_email: boolean;
+          profile_id: string | null;
+          contacts: { id: string; name: string; phone: string; email: string } | null;
+          profiles: { id: string; display_name: string; email: string; phone: string } | null;
+        }>;
+      }) => {
+        const nextStructured = STRUCTURED_ROLES.map(blankStructured);
+        const nextOthers: OtherContact[] = [];
+        for (const item of payload.contacts ?? []) {
+          const contact = item.contacts;
+          const linked = item.profiles;
+          const row = {
+            role: item.role,
+            name: linked?.display_name || contact?.name || "",
+            phone: linked?.phone || contact?.phone || "",
+            email: linked?.email || contact?.email || "",
             category: item.category ?? "",
             workScope: item.work_scope ?? "",
-            contactId: item.contacts!.id,
-          }));
-        setContacts(rows);
+            contactId: contact?.id,
+            profileId: item.profile_id ?? linked?.id ?? "",
+            notifyEmail: item.notify_email,
+          };
+          const structuredIndex = STRUCTURED_ROLES.indexOf(item.role as ProjectContactRole);
+          if (structuredIndex >= 0) {
+            nextStructured[structuredIndex] = {
+              role: item.role as ProjectContactRole,
+              profileId: row.profileId,
+              name: row.name,
+              phone: row.phone,
+              email: row.email,
+              contactId: row.contactId,
+              notifyEmail: row.notifyEmail,
+              manual: !row.profileId,
+            };
+          } else if (row.name.trim()) {
+            nextOthers.push({
+              role: PROJECT_CONTACT_ROLE_LABELS[item.role as ProjectContactRole] ?? item.role,
+              name: row.name,
+              phone: row.phone,
+              email: row.email,
+              category: row.category,
+              workScope: row.workScope,
+              contactId: row.contactId,
+            });
+          }
+        }
+        setStructured(nextStructured);
+        setOthers(nextOthers);
       })
-      .catch(() => setContacts([]));
+      .catch(() => {
+        setStructured(STRUCTURED_ROLES.map(blankStructured));
+        setOthers([]);
+      });
   }, [project.id, project.name, project.address, project.status]);
 
-  function updateContact(index: number, patch: Partial<ContactRow>) {
-    setContacts((items) => items.map((item, i) => i === index ? { ...item, ...patch } : item));
+  function updateStructured(index: number, patch: Partial<StructuredContact>) {
+    setStructured((items) => items.map((item, i) => i === index ? { ...item, ...patch } : item));
   }
 
-  function closeSuggestMenus() {
-    setActiveNameSuggest(null);
-    setActiveRoleSuggest(null);
-    setNameSuggestions([]);
-  }
-
-  async function suggestNames(query: string, index: number) {
-    setActiveNameSuggest(index);
-    setActiveRoleSuggest(null);
-    if (query.trim().length < 2) {
-      setNameSuggestions([]);
+  function assignStaff(index: number, userId: string) {
+    if (!userId) {
+      updateStructured(index, { profileId: "", manual: true });
       return;
     }
-    const response = await fetch(`/api/contacts?q=${encodeURIComponent(query.trim())}`);
-    const payload = await response.json() as { contacts?: Array<{ id: string; name: string; phone: string; email: string }> };
-    setNameSuggestions(payload.contacts ?? []);
+    const user = staffOptions.find((item) => item.id === userId);
+    if (!user) return;
+    updateStructured(index, { ...staffSnapshot(user, currentUser), contactId: undefined });
+  }
+
+  function assignSelf(index: number) {
+    if (!currentUser.id) return;
+    updateStructured(index, { ...staffSnapshot(currentUser, currentUser), contactId: undefined });
+  }
+
+  function switchToManual(index: number) {
+    updateStructured(index, { profileId: "", manual: true });
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!name.trim()) return;
-    const savedContacts = contacts
+    const structuredContacts = structured
+      .filter((item) => item.name.trim() || item.profileId)
+      .map((item) => ({
+        role: item.role,
+        name: item.name.trim(),
+        phone: item.phone.trim(),
+        email: item.email.trim(),
+        category: "",
+        workScope: "",
+        contactId: item.contactId,
+        profileId: item.profileId || undefined,
+        notifyEmail: item.notifyEmail,
+      }));
+    const otherContacts = others
       .filter((item) => item.name.trim() && item.role.trim())
       .map((item) => ({ ...item, role: item.role.trim() }));
-    await onSave({ name: name.trim(), address: address.trim(), status, contacts: savedContacts });
+    await onSave({
+      name: name.trim(),
+      address: address.trim(),
+      status,
+      contacts: [...structuredContacts, ...otherContacts],
+    });
   }
 
   return (
@@ -118,7 +281,7 @@ export default function ProjectEdit({ project, saving, onClose, onSave, onDelete
 
         <div className="project-edit-fields">
           <label><span>Projekto pavadinimas *</span><input value={name} onChange={(event) => setName(event.target.value)} required autoFocus /></label>
-          <label><span>Adresas</span><input value={address} onChange={(event) => setAddress(event.target.value)} /></label>
+          <label><span>Adresas</span><input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="Objekto adresas" /></label>
           <label><span>Būsena</span>
             <select value={status} onChange={(event) => setStatus(event.target.value as ProjectStatus)}>
               {projectStatuses.map((item) => <option key={item}>{item}</option>)}
@@ -126,116 +289,105 @@ export default function ProjectEdit({ project, saving, onClose, onSave, onDelete
           </label>
         </div>
 
+        <div className="profile-settings-inline">
+          <div>
+            <strong>Mano kontaktai</strong>
+            <p>{currentUser.displayName || currentUser.email}{currentUser.phone ? ` · ${currentUser.phone}` : ""}</p>
+          </div>
+          <button type="button" className="secondary-button" onClick={onOpenProfile}>Redaguoti paskyrą</button>
+        </div>
+
         <section className="project-contacts-block">
           <div className="project-contacts-head">
             <div>
-              <strong>Kontaktai</strong>
-              <p>Pridėkite tik tuos, kurių reikia. Rolę galite pasirinkti iš sąrašo arba įrašyti savo.</p>
+              <strong>Projekto komanda</strong>
+              <p>Pasirinkite kolegą iš sąrašo arba įveskite kontaktą ranka. „Priskirti save“ užpildo iš jūsų paskyros.</p>
             </div>
-            <button type="button" className="secondary-button" onClick={() => setContacts((items) => [...items, blankContact()])}>＋ Pridėti kontaktą</button>
           </div>
-
-          {!contacts.length ? (
-            <p className="project-contacts-empty">Kontaktų dar nėra. Paspauskite „Pridėti kontaktą“.</p>
-          ) : (
-            <>
-              <div className="contact-grid-head">
-                <span>Rolė</span>
-                <span>Vardas / įmonė</span>
-                <span>Telefonas</span>
-                <span>El. paštas</span>
-                <span />
+          {structured.map((contact, index) => (
+            <article key={contact.role} className="project-contact-card">
+              <div className="project-contact-head">
+                <strong>{PROJECT_CONTACT_ROLE_LABELS[contact.role]}</strong>
+                {contact.profileId ? <span className="project-contact-badge">Priskirtas kolega</span> : null}
               </div>
-              {contacts.map((contact, index) => {
-                const roleOptions = filteredRoleSuggestions(contact.role);
-                return (
-                  <article key={`contact-${index}`} className="project-contact-row">
-                    <div className="contact-autocomplete">
-                      <input
-                        value={contact.role}
-                        onFocus={() => {
-                          setActiveRoleSuggest(index);
-                          setActiveNameSuggest(null);
-                          setNameSuggestions([]);
-                        }}
-                        onBlur={() => {
-                          window.setTimeout(() => {
-                            setActiveRoleSuggest((current) => (current === index ? null : current));
-                          }, 150);
-                        }}
-                        onChange={(event) => {
-                          updateContact(index, { role: event.target.value });
-                          setActiveRoleSuggest(index);
-                          setActiveNameSuggest(null);
-                        }}
-                        placeholder="Pvz., Darbų vadovas"
-                        autoComplete="off"
-                      />
-                      {activeRoleSuggest === index && roleOptions.length > 0 && (
-                        <div className="contact-suggestions contact-role-suggestions">
-                          {roleOptions.map((item) => (
-                            <button
-                              type="button"
-                              key={item.value}
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => {
-                                updateContact(index, { role: item.label });
-                                setActiveRoleSuggest(null);
-                              }}
-                            >
-                              {item.label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div className="contact-autocomplete">
-                      <input
-                        value={contact.name}
-                        onFocus={() => {
-                          setActiveNameSuggest(index);
-                          setActiveRoleSuggest(null);
-                        }}
-                        onBlur={() => {
-                          window.setTimeout(() => {
-                            setActiveNameSuggest((current) => (current === index ? null : current));
-                            setNameSuggestions([]);
-                          }, 150);
-                        }}
-                        onChange={(event) => {
-                          updateContact(index, { name: event.target.value, contactId: undefined });
-                          void suggestNames(event.target.value, index);
-                        }}
-                        placeholder="Pradėkite rašyti…"
-                        autoComplete="off"
-                      />
-                      {activeNameSuggest === index && nameSuggestions.length > 0 && (
-                        <div className="contact-suggestions">
-                          {nameSuggestions.map((item) => (
-                            <button
-                              type="button"
-                              key={item.id}
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => {
-                                updateContact(index, { contactId: item.id, name: item.name, phone: item.phone, email: item.email });
-                                closeSuggestMenus();
-                              }}
-                            >
-                              <b>{item.name}</b>
-                              <small>{[item.phone, item.email].filter(Boolean).join(" · ")}</small>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <input value={contact.phone} onChange={(event) => updateContact(index, { phone: event.target.value })} placeholder="+370…" />
-                    <input type="email" value={contact.email} onChange={(event) => updateContact(index, { email: event.target.value })} placeholder="vardas@imone.lt" />
-                    <button type="button" className="project-contact-remove" onClick={() => setContacts((items) => items.filter((_, i) => i !== index))} aria-label={`Pašalinti ${roleLabel(contact.role) || "kontaktą"}`}>×</button>
-                  </article>
-                );
-              })}
-            </>
-          )}
+
+              <div className="project-contact-picker">
+                <label><span>Pasirinkti kolegą</span>
+                  <select value={contact.profileId} onChange={(event) => assignStaff(index, event.target.value)}>
+                    <option value="">— Įvesti ranka —</option>
+                    {staffOptions.map((user) => (
+                      <option key={user.id} value={user.id}>
+                        {user.id === currentUser.id ? `★ Aš · ${user.display_name}` : user.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="project-contact-quick">
+                  <button type="button" className="secondary-button" onClick={() => assignSelf(index)} disabled={!currentUser.id}>
+                    Priskirti save
+                  </button>
+                  {contact.profileId ? (
+                    <button type="button" className="secondary-button" onClick={() => switchToManual(index)}>
+                      Keisti ranka
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="project-contact-fields">
+                <label><span>Vardas / įmonė</span><input value={contact.name} onChange={(event) => updateStructured(index, { name: event.target.value, profileId: "", manual: true })} placeholder="Vardas arba įmonė" /></label>
+                <div className="project-contact-links">
+                  <label><span>Telefonas</span><PhoneInput value={contact.phone} onChange={(value) => updateStructured(index, { phone: value, profileId: "", manual: true })} /></label>
+                  <label><span>El. paštas</span><input type="email" value={contact.email} onChange={(event) => updateStructured(index, { email: event.target.value, profileId: "", manual: true })} placeholder="vardas@imone.lt" /></label>
+                </div>
+              </div>
+
+              {(contact.phone || contact.email) ? (
+                <div className="project-contact-actions">
+                  <span className="project-contact-actions-label">Greiti veiksmai</span>
+                  <div className="project-contact-tap-links">
+                    {contact.phone ? <a href={`tel:${contact.phone.replace(/\s/g, "")}`}>Skambinti</a> : null}
+                    {contact.email ? <a href={`mailto:${contact.email}`}>Rašyti el. laišką</a> : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {contact.role !== "works_manager" ? (
+                <label className="project-contact-notify">
+                  <input
+                    type="checkbox"
+                    checked={contact.notifyEmail}
+                    onChange={(event) => updateStructured(index, { notifyEmail: event.target.checked })}
+                  />
+                  <span>Siųsti dienos suvestinę el. paštu</span>
+                </label>
+              ) : null}
+            </article>
+          ))}
+        </section>
+
+        <section className="project-contacts-block">
+          <div className="project-contacts-head">
+            <div><strong>Kiti kontaktai</strong><p>Pvz. tiekėjas, montuotojas, kliento atstovas.</p></div>
+            <button type="button" className="secondary-button" onClick={() => setOthers((items) => [...items, blankOther()])}>＋ Pridėti</button>
+          </div>
+          {others.map((contact, index) => (
+            <article key={`other-${index}`} className="project-contact-card">
+              <label><span>Rolė</span><input value={contact.role} onChange={(event) => setOthers((items) => items.map((item, i) => i === index ? { ...item, role: event.target.value } : item))} placeholder="Pvz., Montuotojas" /></label>
+              <label><span>Vardas</span><input value={contact.name} onChange={(event) => setOthers((items) => items.map((item, i) => i === index ? { ...item, name: event.target.value } : item))} placeholder="Vardas arba įmonė" /></label>
+              <div className="project-contact-links">
+                <label><span>Telefonas</span><PhoneInput value={contact.phone} onChange={(value) => setOthers((items) => items.map((item, i) => i === index ? { ...item, phone: value } : item))} /></label>
+                <label><span>El. paštas</span><input type="email" value={contact.email} onChange={(event) => setOthers((items) => items.map((item, i) => i === index ? { ...item, email: event.target.value } : item))} placeholder="vardas@imone.lt" /></label>
+              </div>
+              {(contact.phone || contact.email) && (
+                <div className="project-contact-tap-links">
+                  {contact.phone ? <a href={`tel:${contact.phone.replace(/\s/g, "")}`}>Skambinti</a> : null}
+                  {contact.email ? <a href={`mailto:${contact.email}`}>Rašyti el. laišką</a> : null}
+                </div>
+              )}
+              <button type="button" className="project-contact-remove wide" onClick={() => setOthers((items) => items.filter((_, i) => i !== index))}>Pašalinti kontaktą</button>
+            </article>
+          ))}
         </section>
 
         <div className="panel-actions project-edit-actions">

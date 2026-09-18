@@ -10,4 +10,4 @@ npm install
 npm run dev
 ```
 
-Pirmas prisijungęs el. paštas tampa Distyle (staff). Klientus kviečia **Komanda**. Domenas vėliau: `brokai.distyle.lt`.
+Pirmas prisijungęs el. paštas tampa Distyle (staff). Klientus kviečia **Komanda**. Produkcija: `brokai.digroup.lt`.

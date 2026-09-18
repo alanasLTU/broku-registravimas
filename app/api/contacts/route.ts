@@ -1,5 +1,6 @@
 import { apiError, requirePermission, requireUser } from "@/lib/auth";
 import { asUuid } from "@/lib/ids";
+import { sanitizeLtPhoneInput } from "@/lib/phone";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +40,7 @@ export async function POST(request: Request) {
       .insert({
         id: asUuid(crypto.randomUUID()),
         name,
-        phone: payload.phone?.trim().slice(0, 80) ?? "",
+        phone: payload.phone ? sanitizeLtPhoneInput(payload.phone).slice(0, 80) : "",
         email: payload.email?.trim().slice(0, 200) ?? "",
         notes: payload.notes?.trim().slice(0, 2000) ?? "",
         created_by: profile.id,

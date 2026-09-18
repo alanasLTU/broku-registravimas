@@ -1,12 +1,18 @@
 "use client";
 
-import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PhotoEditor from "./components/photo-editor";
 import MediaViewer, { type MediaViewerItem } from "./components/media-viewer";
 import RecordThumb from "./components/record-thumb";
 import MediaFileButton from "./components/media-file-button";
 import ResponsiblePicker from "./components/responsible-picker";
 import ProjectEdit from "./components/project-edit";
+import ProjectContactsBar from "./components/project-contacts-bar";
+import ProfileSettings from "./components/profile-settings";
+import DateInput from "./components/date-input";
+import InvoiceCapture from "./components/invoice-capture";
+import InvoiceList from "./components/invoice-list";
+import InvoiceReportModal from "./components/invoice-report-modal";
 import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, ARCHIVED_TAB, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, clientRecordTypes, isProjectCompleted, isRecordArchived, normalizeProjectStatus, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectStatus } from "@/lib/constants";
 import { buildResponsiblePayload, normalizeResponsibleParty, responsibleClassSlug, responsibleDisplay, responsibleOtherText, type ResponsibleParty } from "@/lib/responsible";
 import { DEFAULT_REPORT_OPTIONS, REPORT_OPTION_LABELS, buildReportFieldRows, type ReportOptions } from "@/lib/report-fields";
@@ -16,8 +22,9 @@ import { isInternalRole } from "@/lib/permissions";
 import { copyText, shareOrCopyText } from "@/lib/copy-text";
 import { createBrowserSupabase } from "@/lib/supabase/client";
 import { errorMessage } from "@/lib/errors";
-import { imageTooLarge, isImageFile, isVideoFile, mediaFileName, mimeOf, videoTooLarge } from "@/lib/media";
+import { imageTooLarge, isImageFile, isVideoFile, mediaFileName, mimeOf, pickInvoiceUploadFile, preparePhotoForUpload, preparePhotoThumb, thumbObjectKeyFor, videoTooLarge } from "@/lib/media";
 import type { RegisterPayload } from "@/lib/register-data";
+import { formatMoneyEuro, matchesInvoiceSearch, type Invoice } from "@/lib/invoices";
 
 type Status = typeof statusList[number];
 type Priority = "Kritinis" | "Aukštas" | "Vidutinis" | "Žemas";
@@ -32,11 +39,13 @@ type Project = {
   status?: ProjectStatus;
   archived?: boolean;
   clientsSeeStaffRecords?: boolean;
+  invoiceTotalCents?: number;
 };
 
 type DefectPhoto = {
   id: string;
   url: string;
+  thumbUrl?: string;
   caption: string;
   kind?: "photo";
   fileName?: string;
@@ -105,8 +114,10 @@ type Defect = {
 };
 
 type Profile = {
+  id?: string;
   displayName: string;
   email: string;
+  phone?: string;
   role: "admin" | "staff" | "contractor" | "client";
   isSuperAdmin?: boolean;
   permissions?: Partial<Record<PermissionKey, boolean>>;
@@ -121,7 +132,7 @@ type DetailMetaDraft = {
   responsible: ResponsibleParty;
   assignee: string;
   executor: string;
-  supervisorId: string;
+  supervisorName: string;
   due: string;
   status: Status;
   requestedBy: string;
@@ -157,7 +168,7 @@ function metaDraftFromDefect(defect: Defect): DetailMetaDraft {
     responsible: party,
     assignee: responsibleOtherText(defect.responsible, defect.assignee),
     executor: defect.executor ?? "",
-    supervisorId: defect.supervisorId ?? "",
+    supervisorName: defect.supervisorName ?? "",
     due: defect.due,
     status: defect.status,
     requestedBy: defect.requestedBy ?? "",
@@ -268,7 +279,7 @@ function defectVideosFor(defect: Defect | null): DefectVideo[] {
 
 function defectMediaFor(defect: Defect | null): MediaViewerItem[] {
   return [
-    ...defectPhotosFor(defect).map((item) => ({ id: item.id, url: item.url, kind: "photo" as const, caption: item.caption, fileName: item.fileName })),
+    ...defectPhotosFor(defect).map((item) => ({ id: item.id, url: item.url, thumbUrl: item.thumbUrl, kind: "photo" as const, caption: item.caption, fileName: item.fileName })),
     ...defectVideosFor(defect).map((item) => ({ id: item.id, url: item.url, kind: "video" as const, caption: item.caption, fileName: item.fileName })),
   ];
 }
@@ -343,7 +354,12 @@ export default function Home({ initialData = null }: HomeProps) {
   const [activeStatus, setActiveStatus] = useState<Status | "Visi" | typeof ARCHIVED_TAB>("Visi");
   const [search, setSearch] = useState("");
   const [captureOpen, setCaptureOpen] = useState(false);
-  const [captureStep, setCaptureStep] = useState<"type" | "form">("type");
+  const [captureStep, setCaptureStep] = useState<"type" | "form" | "invoice">("type");
+  const [pendingInvoiceFile, setPendingInvoiceFile] = useState<File | null>(null);
+  const [invoiceListDragActive, setInvoiceListDragActive] = useState(false);
+  const [registerTab, setRegisterTab] = useState<"records" | "invoices">("records");
+  const [invoices, setInvoices] = useState<Invoice[]>(() => initialData?.invoices ?? []);
+  const [invoiceReportOpen, setInvoiceReportOpen] = useState(false);
   const [captureSaving, setCaptureSaving] = useState(false);
   const [showCaptureNote, setShowCaptureNote] = useState(false);
   const [showCaptureMore, setShowCaptureMore] = useState(false);
@@ -365,6 +381,8 @@ export default function Home({ initialData = null }: HomeProps) {
   const [editProjectAddress, setEditProjectAddress] = useState("");
   const [editProjectStatus, setEditProjectStatus] = useState<ProjectStatus>("Vykdomas");
   const [editProjectSaving, setEditProjectSaving] = useState(false);
+  const [projectContactsRevision, setProjectContactsRevision] = useState(0);
+  const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [showCompletedProjects, setShowCompletedProjects] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectSearch, setProjectSearch] = useState("");
@@ -386,6 +404,13 @@ export default function Home({ initialData = null }: HomeProps) {
   const [staffUsers, setStaffUsers] = useState<Array<{ id: string; display_name: string }>>([]);
   const [printImageUrls, setPrintImageUrls] = useState<Record<string, string[]>>({});
   const [connection, setConnection] = useState<"loading" | "synced" | "demo">(() => (initialData ? "synced" : "loading"));
+  const [refreshing, setRefreshing] = useState(false);
+  const [pullOffset, setPullOffset] = useState(0);
+  const refreshInFlight = useRef(false);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const pullStartY = useRef<number | null>(null);
+  const pullArmed = useRef(false);
+  const pullOffsetRef = useRef(0);
   const [toast, setToast] = useState("");
   const [photoEditorTarget, setPhotoEditorTarget] = useState<PhotoEditorTarget | null>(null);
   const [photoEditorSaving, setPhotoEditorSaving] = useState(false);
@@ -404,6 +429,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const [detailMetaSaving, setDetailMetaSaving] = useState(false);
   const [captureResponsible, setCaptureResponsible] = useState<ResponsibleParty>("Montuotojai");
   const [captureResponsibleOther, setCaptureResponsibleOther] = useState("");
+  const [captureDueDate, setCaptureDueDate] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -497,6 +523,62 @@ export default function Home({ initialData = null }: HomeProps) {
     return () => { active = false; };
   }, [initialData]);
 
+  const refreshRegister = useCallback(async (options?: { quiet?: boolean }) => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    setRefreshing(true);
+    try {
+      const response = await fetch("/api/register", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({})) as {
+        projects?: Project[];
+        defects?: Defect[];
+        invoices?: Invoice[];
+        user?: Profile;
+        error?: string;
+      };
+      if (!response.ok || !payload.user || !payload.projects || !payload.defects) {
+        throw new Error(payload.error || "Duomenų bazė nepasiekiama");
+      }
+      setProjects(payload.projects);
+      setDefects(normalizeDefects(payload.defects as Defect[]));
+      setInvoices(payload.invoices ?? []);
+      setProfile(payload.user);
+      const currentProjectId = projectIdRef.current;
+      if (!currentProjectId || !payload.projects.some((project) => project.id === currentProjectId)) {
+        const nextProjectId = payload.projects[0]?.id ?? "";
+        if (nextProjectId) {
+          projectIdRef.current = nextProjectId;
+          setProjectId(nextProjectId);
+          window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextProjectId);
+        }
+      }
+      setConnection("synced");
+      if (detailId) {
+        void fetch(`/api/defects/${detailId}/events`)
+          .then((eventsResponse) => eventsResponse.json())
+          .then((eventsPayload: { events?: RecordEvent[] }) => setRecordEvents(eventsPayload.events ?? []))
+          .catch(() => undefined);
+      }
+      if (!options?.quiet) showToast("Sąrašas atnaujintas");
+    } catch (error) {
+      if (!options?.quiet) showToast(error instanceof Error ? error.message : "Nepavyko atnaujinti");
+    } finally {
+      refreshInFlight.current = false;
+      setRefreshing(false);
+      pullOffsetRef.current = 0;
+      setPullOffset(0);
+    }
+  }, [detailId]);
+
+  useEffect(() => {
+    function onVisibilityChange() {
+      if (document.visibilityState !== "visible") return;
+      void refreshRegister({ quiet: true });
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [refreshRegister]);
+
   useEffect(() => {
     if (!detailId) {
       setDetailMetaDraft(null);
@@ -509,18 +591,46 @@ export default function Home({ initialData = null }: HomeProps) {
       .then((response) => response.json())
       .then((payload: { events?: RecordEvent[] }) => setRecordEvents(payload.events ?? []))
       .catch(() => setRecordEvents([]));
-  }, [detailId, defects]);
+  }, [detailId]);
 
   useEffect(() => {
-    if (!isInternalRole(profile.role, profile.isSuperAdmin)) return;
+    if (!detailId || !isInternalRole(profile.role, profile.isSuperAdmin) || staffUsers.length) return;
     void fetch("/api/staff")
       .then((response) => response.json())
       .then((payload: { users?: Array<{ id: string; display_name: string }> }) => setStaffUsers(payload.users ?? []))
       .catch(() => setStaffUsers([]));
-  }, [profile.role]);
+  }, [detailId, profile.role, profile.isSuperAdmin, staffUsers.length]);
+
+  const supervisorSuggestions = useMemo(() => {
+    const seen = new Set<string>();
+    return staffUsers.filter((user) => {
+      const name = user.display_name.trim();
+      if (!name) return false;
+      const key = name.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [staffUsers]);
 
   useEffect(() => {
-    const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen || Boolean(editProjectId);
+    void fetch("/api/me")
+      .then((response) => response.json())
+      .then((payload: { profile?: { id: string; displayName: string; email: string; phone: string } }) => {
+        if (!payload.profile) return;
+        setProfile((current) => ({
+          ...current,
+          id: payload.profile!.id,
+          displayName: payload.profile!.displayName || current.displayName,
+          email: payload.profile!.email || current.email,
+          phone: payload.profile!.phone ?? current.phone,
+        }));
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen || Boolean(editProjectId) || profileSettingsOpen;
     if (!modalOpen) return;
     const { body } = document;
     const previousOverflow = body.style.overflow;
@@ -528,7 +638,7 @@ export default function Home({ initialData = null }: HomeProps) {
     return () => {
       body.style.overflow = previousOverflow;
     };
-  }, [captureOpen, completeOpen, detailId, editProjectId, filtersOpen, inviteOpen, mediaViewerIndex, newProjectOpen, photoEditorTarget, projectPickerOpen, reportMode]);
+  }, [captureOpen, completeOpen, detailId, editProjectId, filtersOpen, inviteOpen, mediaViewerIndex, newProjectOpen, photoEditorTarget, profileSettingsOpen, projectPickerOpen, reportMode]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -547,6 +657,63 @@ export default function Home({ initialData = null }: HomeProps) {
     window.setTimeout(() => setToast(""), 3200);
   }
 
+  function canPullToRefresh() {
+    return !captureOpen
+      && !reportMode
+      && !detailId
+      && mediaViewerIndex == null
+      && !photoEditorTarget
+      && !projectPickerOpen
+      && !inviteOpen
+      && !newProjectOpen
+      && !completeOpen;
+  }
+
+  function isPageAtTop() {
+    const scrollTop = window.scrollY
+      || document.documentElement.scrollTop
+      || document.body.scrollTop
+      || 0;
+    return scrollTop <= 4;
+  }
+
+  function onWorkspaceTouchStart(event: React.TouchEvent<HTMLDivElement>) {
+    if (!canPullToRefresh() || !isPageAtTop()) return;
+    pullStartY.current = event.touches[0]?.clientY ?? null;
+    pullArmed.current = pullStartY.current != null;
+  }
+
+  function onWorkspaceTouchMove(event: React.TouchEvent<HTMLDivElement>) {
+    if (!pullArmed.current || pullStartY.current == null) return;
+    if (!isPageAtTop()) {
+      pullArmed.current = false;
+      pullOffsetRef.current = 0;
+      setPullOffset(0);
+      return;
+    }
+    const delta = (event.touches[0]?.clientY ?? pullStartY.current) - pullStartY.current;
+    if (delta > 0) {
+      const next = Math.min(delta, 110);
+      pullOffsetRef.current = next;
+      setPullOffset(next);
+      if (next > 12 && event.cancelable) event.preventDefault();
+    } else {
+      pullOffsetRef.current = 0;
+      setPullOffset(0);
+    }
+  }
+
+  function onWorkspaceTouchEnd() {
+    if (!pullArmed.current) return;
+    pullArmed.current = false;
+    pullStartY.current = null;
+    if (pullOffsetRef.current > 68) void refreshRegister();
+    else {
+      pullOffsetRef.current = 0;
+      setPullOffset(0);
+    }
+  }
+
   function selectProject(nextProjectId: string, announce = true) {
     const nextProject = projects.find((project) => project.id === nextProjectId);
     projectIdRef.current = nextProjectId;
@@ -562,7 +729,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const isStaff = isInternalRole(profile.role, profile.isSuperAdmin);
   const isClient = profile.role === "client" && !profile.isSuperAdmin;
   const captureTypes = isClient ? clientCaptureTypes : recordTypes;
-  const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: isClient ? "Objektas nepriskirtas" : "Nėra projekto", address: "", open: 0, overdue: 0, status: "Vykdomas" as ProjectStatus, archived: false, clientsSeeStaffRecords: false };
+  const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: isClient ? "Objektas nepriskirtas" : "Nėra projekto", address: "", open: 0, overdue: 0, status: "Vykdomas" as ProjectStatus, archived: false, clientsSeeStaffRecords: false, invoiceTotalCents: 0 };
   const projectCompleted = isProjectCompleted(activeProject);
 
   function openProjectPicker() {
@@ -615,6 +782,10 @@ export default function Home({ initialData = null }: HomeProps) {
     });
   }, [activeStatus, createdByFilter, createdFromFilter, createdToFilter, defects, dueFromFilter, dueToFilter, executorFilter, isClient, originFilter, priorityFilter, resolvedProjectId, responsibleFilter, roomFilter, search, titleFilter, typeFilter]);
 
+  const projectInvoices = useMemo(() => invoices.filter((item) => item.projectId === resolvedProjectId), [invoices, resolvedProjectId]);
+  const projectInvoiceExVatCents = projectInvoices.reduce((acc, item) => acc + item.amountCentsExVat, 0);
+  const visibleInvoices = useMemo(() => projectInvoices.filter((invoice) => matchesInvoiceSearch(invoice, search)), [projectInvoices, search]);
+
   const detail = defects.find((defect) => defect.id === detailId) ?? null;
 
   useEffect(() => {
@@ -630,7 +801,7 @@ export default function Home({ initialData = null }: HomeProps) {
     setChildTaskDrafts(Object.fromEntries(
       current.childTasks.map((task) => [task.id, { title: task.title, status: normalizeStatus(task.status) }]),
     ));
-  }, [detailId, defects]);
+  }, [detailId]);
   const detailMetaDirty = useMemo(() => {
     if (!detail || !detailMetaDraft) return false;
     return JSON.stringify(metaDraftFromDefect(detail)) !== JSON.stringify(detailMetaDraft);
@@ -679,6 +850,38 @@ export default function Home({ initialData = null }: HomeProps) {
     setCaptureOpen(true);
   }
 
+  function openInvoiceCapture() {
+    if (projectCompleted) {
+      showToast("Projektas baigtas. Pakeiskite būseną į „Vykdomas“, jei vėl fiksuojate.");
+      return;
+    }
+    if (!resolvedProjectId) {
+      showToast("Pasirinkite objektą.");
+      return;
+    }
+    setCaptureStep("invoice");
+    setCaptureOpen(true);
+  }
+
+  function handleInvoiceListDrop(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setInvoiceListDragActive(false);
+    if (!isStaff || registerTab !== "invoices" || projectCompleted) return;
+    if (!resolvedProjectId) {
+      showToast("Pasirinkite objektą.");
+      return;
+    }
+    const picked = pickInvoiceUploadFile(event.dataTransfer.files);
+    if (!picked) {
+      showToast("Nutempkite nuotrauką arba PDF failą");
+      return;
+    }
+    setPendingInvoiceFile(picked);
+    setCaptureStep("invoice");
+    setCaptureOpen(true);
+  }
+
   function closeCapture() {
     setCaptureOpen(false);
     setCaptureStep("type");
@@ -688,9 +891,15 @@ export default function Home({ initialData = null }: HomeProps) {
     setAnnotatePromptPhotoId(null);
     setCaptureResponsible("Montuotojai");
     setCaptureResponsibleOther("");
+    setCaptureDueDate("");
+    setPendingInvoiceFile(null);
   }
 
-  function chooseCaptureType(type: RecordType) {
+  function chooseCaptureType(type: RecordType | "Sąskaita") {
+    if (type === "Sąskaita") {
+      setCaptureStep("invoice");
+      return;
+    }
     if (isClient && type === "Užduotis") return;
     setCaptureRecordType(type);
     window.localStorage.setItem(ACTIVE_TYPE_STORAGE_KEY, type);
@@ -790,28 +999,42 @@ export default function Home({ initialData = null }: HomeProps) {
 
   async function uploadMediaToRecord(recordId: string, nextProjectId: string, photos: PhotoDraft[], videos: VideoDraft[]) {
     const supabase = createBrowserSupabase();
-    const media: Array<{ id: string; objectKey: string; fileName: string; mimeType: string; mediaKind: "photo" | "video"; fileSize: number; caption: string }> = [];
+    const media: Array<{ id: string; objectKey: string; thumbObjectKey?: string; fileName: string; mimeType: string; mediaKind: "photo" | "video"; fileSize: number; caption: string }> = [];
     const all = [
       ...photos.map((item) => ({ ...item, kind: "photo" as const })),
       ...videos.map((item) => ({ ...item, kind: "video" as const })),
     ];
     for (const item of all) {
       const mediaId = randomId();
-      const fileName = mediaFileName(item.file, item.kind);
+      const uploadFile = item.kind === "photo" ? await preparePhotoForUpload(item.file) : item.file;
+      const fileName = mediaFileName(uploadFile, item.kind);
       const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "-").slice(-90) || item.kind;
       const objectKey = `${nextProjectId}/${recordId}/${mediaId}-${safeName}`;
-      const { error } = await supabase.storage.from(MEDIA_BUCKET).upload(objectKey, item.file, {
-        contentType: mimeOf(item.file, item.kind),
+      const { error } = await supabase.storage.from(MEDIA_BUCKET).upload(objectKey, uploadFile, {
+        contentType: mimeOf(uploadFile, item.kind),
         upsert: false,
       });
       if (error) throw new Error(errorMessage(error, "Failo įkelti į saugyklą nepavyko"));
+      let thumbObjectKey: string | undefined;
+      if (item.kind === "photo") {
+        const thumbFile = await preparePhotoThumb(uploadFile);
+        if (thumbFile) {
+          thumbObjectKey = thumbObjectKeyFor(nextProjectId, recordId, mediaId);
+          const { error: thumbError } = await supabase.storage.from(MEDIA_BUCKET).upload(thumbObjectKey, thumbFile, {
+            contentType: "image/jpeg",
+            upsert: false,
+          });
+          if (thumbError) thumbObjectKey = undefined;
+        }
+      }
       media.push({
         id: mediaId,
         objectKey,
+        thumbObjectKey,
         fileName,
         mimeType: mimeOf(item.file, item.kind),
         mediaKind: item.kind,
-        fileSize: item.file.size,
+        fileSize: uploadFile.size,
         caption: item.caption,
       });
     }
@@ -904,18 +1127,10 @@ export default function Home({ initialData = null }: HomeProps) {
       let url = photo.url;
       let revokeUrl: string | undefined;
       if (!photo.url.startsWith("blob:")) {
-        const supabase = createBrowserSupabase();
-        if (photo.objectKey) {
-          const { data, error } = await supabase.storage.from(MEDIA_BUCKET).download(photo.objectKey);
-          if (error || !data) throw new Error(error?.message || "Nuotraukos atsisiųsti nepavyko");
-          revokeUrl = URL.createObjectURL(data);
-          url = revokeUrl;
-        } else {
-          const response = await fetch(`/api/media/${detailId}/${photo.id}`);
-          if (!response.ok) throw new Error("Nuotraukos atsisiųsti nepavyko");
-          revokeUrl = URL.createObjectURL(await response.blob());
-          url = revokeUrl;
-        }
+        const response = await fetch(`/api/media/${detailId}/${photo.id}`);
+        if (!response.ok) throw new Error("Nuotraukos atsisiųsti nepavyko");
+        revokeUrl = URL.createObjectURL(await response.blob());
+        url = revokeUrl;
       }
       setPhotoEditorTarget({
         kind: "saved",
@@ -958,12 +1173,27 @@ export default function Home({ initialData = null }: HomeProps) {
         || `${resolvedProjectId}/${target.defectId}/${target.photoId}.jpg`;
       const { error: uploadError } = await supabase.storage.from(MEDIA_BUCKET).upload(objectKey, file, { contentType: file.type || "image/jpeg", upsert: true });
       if (uploadError) throw uploadError;
-      const response = await fetch(`/api/media/${target.defectId}/${target.photoId}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ objectKey }) });
-      const payload = await response.json() as { url?: string; fileName?: string; error?: string };
+      const thumbObjectKey = thumbObjectKeyFor(resolvedProjectId, target.defectId, target.photoId);
+      const thumbFile = await preparePhotoThumb(file);
+      if (thumbFile) {
+        await supabase.storage.from(MEDIA_BUCKET).upload(thumbObjectKey, thumbFile, { contentType: "image/jpeg", upsert: true });
+      }
+      const response = await fetch(`/api/media/${target.defectId}/${target.photoId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ objectKey, thumbObjectKey: thumbFile ? thumbObjectKey : undefined }),
+      });
+      const payload = await response.json() as { url?: string; thumbUrl?: string; fileName?: string; error?: string };
       if (!response.ok || !payload.url) throw new Error(payload.error || "Nuotraukos išsaugoti nepavyko");
       setDefects((items) => items.map((item) => {
         if (item.id !== target.defectId) return item;
-        const photos = defectPhotosFor(item).map((photo) => photo.id === target.photoId ? { ...photo, url: payload.url!, fileName: payload.fileName || file.name, objectKey } : photo);
+        const photos = defectPhotosFor(item).map((photo) => photo.id === target.photoId ? {
+          ...photo,
+          url: payload.url!,
+          thumbUrl: payload.thumbUrl ?? photo.thumbUrl,
+          fileName: payload.fileName || file.name,
+          objectKey,
+        } : photo);
         return { ...item, photos, photo: photos[0]?.url };
       }));
       if (target.revokeUrl) URL.revokeObjectURL(target.revokeUrl);
@@ -1052,7 +1282,7 @@ export default function Home({ initialData = null }: HomeProps) {
       zone: detailMetaDraft.zone,
       ...buildResponsiblePayload(detailMetaDraft.responsible, detailMetaDraft.assignee),
       executor: detailMetaDraft.executor,
-      supervisorId: detailMetaDraft.supervisorId || null,
+      supervisorName: detailMetaDraft.supervisorName,
       due: detailMetaDraft.due || "Nenustatyta",
       status: detailMetaDraft.status,
       requestedBy: detailMetaDraft.requestedBy,
@@ -1092,6 +1322,59 @@ export default function Home({ initialData = null }: HomeProps) {
       showToast("Užduotis išsaugota");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Nepavyko išsaugoti užduoties");
+    } finally {
+      setChildTaskSavingId(null);
+    }
+  }
+
+  async function completeChildTask(taskId: string) {
+    if (!detailId) return;
+    setChildTaskSavingId(taskId);
+    try {
+      const response = await fetch(`/api/defects/${taskId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: COMPLETED_STATUS }),
+      });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Nepavyko užbaigti");
+      setDefects((items) => items.map((item) => item.id === detailId ? {
+        ...item,
+        childTasks: (item.childTasks ?? []).filter((task) => task.id !== taskId),
+      } : item));
+      setChildTaskDrafts((drafts) => {
+        const next = { ...drafts };
+        delete next[taskId];
+        return next;
+      });
+      showToast("Užduotis baigta");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Nepavyko užbaigti užduoties");
+    } finally {
+      setChildTaskSavingId(null);
+    }
+  }
+
+  async function deleteChildTask(taskId: string) {
+    if (!detailId) return;
+    if (!window.confirm("Ištrinti susijusią užduotį? Ji bus pašalinta negrįžtamai.")) return;
+    setChildTaskSavingId(taskId);
+    try {
+      const response = await fetch(`/api/defects/${taskId}`, { method: "DELETE" });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Nepavyko ištrinti");
+      setDefects((items) => items.map((item) => item.id === detailId ? {
+        ...item,
+        childTasks: (item.childTasks ?? []).filter((task) => task.id !== taskId),
+      } : item));
+      setChildTaskDrafts((drafts) => {
+        const next = { ...drafts };
+        delete next[taskId];
+        return next;
+      });
+      showToast("Užduotis ištrinta");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "Nepavyko ištrinti užduoties");
     } finally {
       setChildTaskSavingId(null);
     }
@@ -1393,7 +1676,7 @@ export default function Home({ initialData = null }: HomeProps) {
     setProjectPickerOpen(false);
   }
 
-  async function saveEditedProject(payload: { name: string; address: string; status: ProjectStatus; contacts: Array<{ role: string; name: string; phone: string; email: string; category: string; workScope: string; contactId?: string }> }) {
+  async function saveEditedProject(payload: { name: string; address: string; status: ProjectStatus; contacts: Array<{ role: string; name: string; phone: string; email: string; category: string; workScope: string; contactId?: string; profileId?: string; notifyEmail?: boolean }> }) {
     if (!editProjectId) return;
     setEditProjectSaving(true);
     try {
@@ -1415,13 +1698,14 @@ export default function Home({ initialData = null }: HomeProps) {
         body: JSON.stringify({
           contacts: payload.contacts.map((item) => ({
             id: item.contactId,
+            profileId: item.profileId,
             role: item.role,
             name: item.name,
             phone: item.phone,
             email: item.email,
             category: item.category,
             workScope: item.workScope,
-            notifyEmail: false,
+            notifyEmail: item.notifyEmail,
           })),
         }),
       });
@@ -1433,6 +1717,7 @@ export default function Home({ initialData = null }: HomeProps) {
         archived: body.project!.archived,
       } : item));
       setEditProjectId(null);
+      setProjectContactsRevision((value) => value + 1);
       showToast(body.project.status === "Baigtas" ? "Projektas pažymėtas kaip baigtas" : "Projektas atnaujintas");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Projekto atnaujinti nepavyko");
@@ -1667,15 +1952,16 @@ export default function Home({ initialData = null }: HomeProps) {
           ))}
         </div>
 
-        <div className="profile-card">
+        <button type="button" className="profile-card" onClick={() => { setProfileSettingsOpen(true); setMobileMenu(false); }} aria-label="Atidaryti mano kontaktus">
           <div className="avatar">{initials(profile.displayName || profile.email || "U")}</div>
           <div>
             <strong>{profile.displayName || "Naudotojas"}</strong>
             <span>{profile.isSuperAdmin || profile.role === "admin" ? "Administratorius" : profile.role === "staff" ? "Distyle komanda" : profile.role === "contractor" ? "Tiekėjas / montuotojas" : "Klientas"}</span>
-            {can(profile, "manage_users") ? <a className="admin-users-link" href="/admin/users">Vartotojai</a> : null}
+            {can(profile, "manage_users") ? <a className="admin-users-link" href="/admin/users" onClick={(event) => event.stopPropagation()}>Vartotojai</a> : null}
           </div>
-          <form action="/logout" method="post"><button type="submit" aria-label="Atsijungti">⎋</button></form>
-        </div>
+          <span className="profile-card-edit" aria-hidden>✎</span>
+        </button>
+        <form className="profile-logout" action="/logout" method="post"><button type="submit" aria-label="Atsijungti">⎋ Atsijungti</button></form>
       </aside>
 
       {mobileMenu && <button className="menu-scrim" onClick={() => setMobileMenu(false)} aria-label="Uždaryti meniu" />}
@@ -1683,12 +1969,38 @@ export default function Home({ initialData = null }: HomeProps) {
       <main className="main-content">
         <header className="topbar">
           <button className="mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Atidaryti meniu">☰</button>
-          <label className="search-field"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ieškoti įrašo, zonos ar atsakingo…" /><kbd>⌘ K</kbd></label>
-          <span className={`sync-pill sync-${connection}`}>{connection === "synced" ? "Sinchronizuota" : connection === "loading" ? "Jungiama…" : "Nėra ryšio"}</span>
+          <label className="search-field"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={registerTab === "invoices" ? "Ieškoti tiekėjo, nr. ar sumos…" : "Ieškoti įrašo, zonos ar atsakingo…"} /><kbd>⌘ K</kbd></label>
+          <button
+            type="button"
+            className={`sync-pill sync-refresh-btn sync-${refreshing ? "loading" : connection}`}
+            onClick={() => void refreshRegister()}
+            disabled={refreshing}
+            aria-label="Atnaujinti sąrašą"
+            title="Atnaujinti sąrašą"
+          >
+            <span className={`sync-refresh-icon${refreshing ? " is-spinning" : ""}`} aria-hidden>↻</span>
+            <span className="sync-refresh-label">
+              {refreshing ? "Atnaujinama…" : connection === "synced" ? "Sinchronizuota" : connection === "loading" ? "Jungiama…" : "Nėra ryšio"}
+            </span>
+          </button>
           <button className="capture-top" onClick={openCapture}><span>＋</span> Naujas įrašas</button>
         </header>
 
-        <div className="workspace">
+        <div
+          ref={workspaceRef}
+          className={`workspace${pullOffset > 0 || refreshing ? " workspace-pulling" : ""}`}
+          onTouchStart={onWorkspaceTouchStart}
+          onTouchMove={onWorkspaceTouchMove}
+          onTouchEnd={onWorkspaceTouchEnd}
+          onTouchCancel={onWorkspaceTouchEnd}
+        >
+          {pullOffset > 0 ? (
+            <div className="pull-refresh-indicator" style={{ height: `${Math.min(pullOffset, 72)}px` }}>
+              <span className={pullOffset > 68 || refreshing ? "pull-ready" : ""}>
+                {refreshing ? "Atnaujinama…" : pullOffset > 68 ? "Paleiskite" : "Patraukite žemyn"}
+              </span>
+            </div>
+          ) : null}
           <section className="project-heading">
             <div>
               <div className="eyebrow"><span className="live-dot" /> {isClient ? "Fiksuojate objekte" : "Aktyvus projektas"}</div>
@@ -1702,6 +2014,16 @@ export default function Home({ initialData = null }: HomeProps) {
                 {projectCompleted ? "Baigtas projektas · " : ""}
                 {activeProject.address || (isClient ? "Čia fiksuojate brokus, apimtis ir papildomas apimtis." : "Projekto informaciją galėsite papildyti vėliau")}
               </p>
+              <button
+                type="button"
+                className="mobile-refresh-bar"
+                onClick={() => void refreshRegister()}
+                disabled={refreshing}
+                aria-label="Atnaujinti sąrašą"
+              >
+                <span className={`sync-refresh-icon${refreshing ? " is-spinning" : ""}`} aria-hidden>↻</span>
+                {refreshing ? "Atnaujinama…" : "Atnaujinti naujausius įrašus"}
+              </button>
             </div>
             {isStaff && (
               <button type="button" className="mobile-client-link" onClick={() => void openInviteModal()}>
@@ -1729,24 +2051,67 @@ export default function Home({ initialData = null }: HomeProps) {
             {isStaff && (
             <div className="heading-actions">
               <button className="secondary-button heading-invite-button" onClick={() => void openInviteModal()}>Klientų nuoroda</button>
+              <button className="secondary-button" onClick={() => setInvoiceReportOpen(true)}>SF ataskaita</button>
               <button className="secondary-button" onClick={() => setReportMode(true)}>Ataskaita / PDF</button>
             </div>
             )}
           </section>
 
+          {isStaff && resolvedProjectId ? (
+            <ProjectContactsBar
+              projectId={resolvedProjectId}
+              refreshKey={projectContactsRevision}
+              onEdit={() => openEditProject(activeProject)}
+            />
+          ) : null}
+
           {!isClient && (
-          <section className="metrics" aria-label="Objekto suvestinė">
+          <section className="metrics metrics-with-spend" aria-label="Objekto suvestinė">
             <article><div><span>Atviri įrašai</span><b className="metric-icon red">!</b></div><strong>{openCount}</strong><p>Brokai, apimtys ir užduotys</p></article>
             <article><div><span>Pradelsti</span><b className="metric-icon amber">↗</b></div><strong>{overdueCount}</strong><p>Reikia jūsų dėmesio</p></article>
             <article><div><span>Vykdomi</span><b className="metric-icon blue">→</b></div><strong>{activeProjectDefects.filter((item) => item.status === "Vykdoma").length}</strong><p>Priskirti atsakingiems</p></article>
             <article><div><span>Baigti</span><b className="metric-icon green">✓</b></div><strong>{archivedCount}</strong><p>Archyvuoti įrašai</p></article>
+            <article className="metric-spend"><div><span>Išleista</span><b className="metric-icon green">€</b></div><strong>{formatMoneyEuro(activeProject.invoiceTotalCents ?? 0)}</strong><p>be PVM {formatMoneyEuro(projectInvoiceExVatCents)}</p></article>
           </section>
           )}
 
-          <section className="register-card">
+          <section
+            className={`register-card${registerTab === "invoices" ? " register-invoices-tab" : ""}${invoiceListDragActive ? " invoice-list-drop-active" : ""}`}
+            onDragEnter={(event) => {
+              if (!isStaff || registerTab !== "invoices" || projectCompleted || captureOpen) return;
+              if (!event.dataTransfer.types.includes("Files")) return;
+              event.preventDefault();
+              setInvoiceListDragActive(true);
+            }}
+            onDragOver={(event) => {
+              if (!isStaff || registerTab !== "invoices" || projectCompleted || captureOpen) return;
+              if (!event.dataTransfer.types.includes("Files")) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+              setInvoiceListDragActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setInvoiceListDragActive(false);
+            }}
+            onDrop={handleInvoiceListDrop}
+          >
+            {invoiceListDragActive ? (
+              <div className="invoice-list-drop-overlay" aria-hidden>
+                <span>⇩</span>
+                <strong>Paleiskite SF failą čia</strong>
+                <small>Atidarys naujos sąskaitos formą</small>
+              </div>
+            ) : null}
             <div className="register-header">
-              <div><h2>{isClient ? "Jūsų fiksavimai" : "Objekto įrašai"}</h2><p>{isClient ? `${visibleDefects.length} įrašai šiame objekte` : `${visibleDefects.length} įrašai pagal pasirinktus filtrus`}</p></div>
-              <div className="register-actions"><button className="secondary-button" onClick={() => setFiltersOpen((value) => !value)}>Filtrai <span className="filter-count">{Number(responsibleFilter !== "Visi") + Number(priorityFilter !== "Visi") + Number(typeFilter !== "Visi") + Number(isStaff && originFilter !== "Visi")}</span></button><button className="secondary-button">Rikiuoti: Naujausi <span>⌄</span></button></div>
+              <div><h2>{registerTab === "invoices" ? "Sąskaitos" : isClient ? "Jūsų fiksavimai" : "Objekto įrašai"}</h2><p>{registerTab === "invoices" ? `${visibleInvoices.length} sąskaitos šiame objekte` : isClient ? `${visibleDefects.length} įrašai šiame objekte` : `${visibleDefects.length} įrašai pagal pasirinktus filtrus`}</p></div>
+              <div className="register-actions">
+                <button type="button" className="secondary-button refresh-button" onClick={() => void refreshRegister()} disabled={refreshing} aria-label="Atnaujinti sąrašą">
+                  <span className={`sync-refresh-icon${refreshing ? " is-spinning" : ""}`} aria-hidden>↻</span>
+                  {refreshing ? "…" : "Atnaujinti"}
+                </button>
+                <button type="button" className="secondary-button" onClick={() => setFiltersOpen((value) => !value)}>Filtrai <span className="filter-count">{Number(responsibleFilter !== "Visi") + Number(priorityFilter !== "Visi") + Number(typeFilter !== "Visi") + Number(isStaff && originFilter !== "Visi")}</span></button>
+                <button type="button" className="secondary-button">Rikiuoti: Naujausi <span>⌄</span></button>
+              </div>
             </div>
 
             {filtersOpen && (
@@ -1759,10 +2124,10 @@ export default function Home({ initialData = null }: HomeProps) {
                 <label><span>Pozicija</span><input value={titleFilter} onChange={(event) => setTitleFilter(event.target.value)} placeholder="Pvz., spinta" /></label>
                 <label><span>Vykdytojas</span><input value={executorFilter === "Visi" ? "" : executorFilter} onChange={(event) => setExecutorFilter(event.target.value || "Visi")} placeholder="Visi" /></label>
                 <label><span>Užregistravo</span><input value={createdByFilter === "Visi" ? "" : createdByFilter} onChange={(event) => setCreatedByFilter(event.target.value || "Visi")} placeholder="Visi" /></label>
-                <label><span>Terminas nuo</span><input type="date" value={dueFromFilter} onChange={(event) => setDueFromFilter(event.target.value)} /></label>
-                <label><span>Terminas iki</span><input type="date" value={dueToFilter} onChange={(event) => setDueToFilter(event.target.value)} /></label>
-                <label><span>Registracija nuo</span><input type="date" value={createdFromFilter} onChange={(event) => setCreatedFromFilter(event.target.value)} /></label>
-                <label><span>Registracija iki</span><input type="date" value={createdToFilter} onChange={(event) => setCreatedToFilter(event.target.value)} /></label>
+                <label><span>Terminas nuo</span><DateInput value={dueFromFilter} onChange={setDueFromFilter} /></label>
+                <label><span>Terminas iki</span><DateInput value={dueToFilter} onChange={setDueToFilter} /></label>
+                <label><span>Registracija nuo</span><DateInput value={createdFromFilter} onChange={setCreatedFromFilter} /></label>
+                <label><span>Registracija iki</span><DateInput value={createdToFilter} onChange={setCreatedToFilter} /></label>
                 <button onClick={() => {
                   setResponsibleFilter("Visi");
                   setPriorityFilter("Visi");
@@ -1780,6 +2145,19 @@ export default function Home({ initialData = null }: HomeProps) {
               </div>
             )}
 
+            <div className="status-tabs register-tabs" role="tablist">
+              <button type="button" className={registerTab === "records" ? "tab-active" : ""} onClick={() => setRegisterTab("records")}>Įrašai</button>
+              {isStaff ? <button type="button" className={registerTab === "invoices" ? "tab-active" : ""} onClick={() => setRegisterTab("invoices")}>Sąskaitos <span>{projectInvoices.length}</span></button> : null}
+            </div>
+
+            {registerTab === "invoices" && isStaff ? (
+              <div className="invoice-tab-actions">
+                <button type="button" className="secondary-button" onClick={() => setInvoiceReportOpen(true)}>SF ataskaita / CSV</button>
+                <button type="button" className="primary-button" onClick={openInvoiceCapture}>＋ Pridėti sąskaitą</button>
+              </div>
+            ) : null}
+
+            {registerTab === "records" && (
             <div className="status-tabs" role="tablist">
               {statusTabs.map((status) => {
                 const count = status === "Visi"
@@ -1790,7 +2168,35 @@ export default function Home({ initialData = null }: HomeProps) {
                 return <button key={status} className={activeStatus === status ? "tab-active" : ""} onClick={() => setActiveStatus(status)}>{status} <span>{count}</span></button>;
               })}
             </div>
+            )}
 
+            {registerTab === "invoices" && isStaff ? (
+              <InvoiceList
+                invoices={visibleInvoices}
+                canEdit={isStaff}
+                onOpen={() => undefined}
+                onAdd={openInvoiceCapture}
+                onReport={() => setInvoiceReportOpen(true)}
+                onUpdated={(invoice) => {
+                  setInvoices((items) => items.map((item) => item.id === invoice.id ? invoice : item));
+                  setProjects((items) => items.map((project) => project.id === invoice.projectId ? {
+                    ...project,
+                    invoiceTotalCents: invoices.map((row) => row.id === invoice.id ? invoice : row).filter((row) => row.projectId === invoice.projectId).reduce((acc, row) => acc + row.amountCentsIncVat, 0),
+                  } : project));
+                }}
+                onDeleted={(invoiceId) => {
+                  const removed = invoices.find((item) => item.id === invoiceId);
+                  setInvoices((items) => items.filter((item) => item.id !== invoiceId));
+                  if (removed) {
+                    setProjects((items) => items.map((project) => project.id === removed.projectId ? {
+                      ...project,
+                      invoiceTotalCents: Math.max(0, (project.invoiceTotalCents ?? 0) - removed.amountCentsIncVat),
+                    } : project));
+                  }
+                }}
+                showToast={showToast}
+              />
+            ) : (
             <div className="defect-table-wrap">
               <table className="defect-table">
                 <thead><tr><th className="check-cell"><input type="checkbox" checked={visibleDefects.length > 0 && visibleDefects.every((item) => item.selected)} onChange={(event) => setVisibleSelection(event.target.checked)} aria-label="Pažymėti visus matomus" /></th><th>Įrašo informacija</th><th>Būsena</th><th>Atsakingas</th><th>Terminas</th><th /></tr></thead>
@@ -1807,12 +2213,14 @@ export default function Home({ initialData = null }: HomeProps) {
                         <RecordThumb
                           recordId={defect.id}
                           photoUrl={photos[0]?.url}
+                          thumbUrl={photos[0]?.thumbUrl}
                           photoId={photos[0]?.id}
                           videoUrl={!photos[0] ? videos[0]?.url : undefined}
                           photoCount={photos.length}
                           videoCount={videos.length}
                           fallbackLabel={initials(defect.zone.split("·")[0])}
                           placeholderClass={`photo-${Number(defect.id.length) % 4}`}
+                          preferThumb
                         />
                         <div className="defect-main"><div><span className={`priority-dot priority-${defect.priority.toLowerCase()}`} /> <b>{defect.code}</b><span className={recordTypeClass(defect.recordType)}>{defect.recordType}</span>{isStaff && originBadge(defect)}<small>{placeLabel(defect)}</small></div><strong>{defect.title}</strong>{summary ? <p>{summary}</p> : null}</div>
                       </td>
@@ -1838,12 +2246,14 @@ export default function Home({ initialData = null }: HomeProps) {
                       <RecordThumb
                         recordId={defect.id}
                         photoUrl={photos[0]?.url}
+                        thumbUrl={photos[0]?.thumbUrl}
                         photoId={photos[0]?.id}
                         videoUrl={!photos[0] ? videos[0]?.url : undefined}
                         photoCount={photos.length}
                         videoCount={videos.length}
                         fallbackLabel={initials(defect.zone.split("·")[0])}
                         placeholderClass={`photo-${Number(defect.id.length) % 4}`}
+                        preferThumb
                       />
                       <div><h3>{defect.title}</h3>{summary ? <p>{summary}</p> : null}</div>
                     </div>
@@ -1858,9 +2268,9 @@ export default function Home({ initialData = null }: HomeProps) {
                   <button type="button" className="primary-button" onClick={openCapture}>＋ Naujas įrašas</button>
                 </div>
               )}
+              {visibleDefects.length > 20 ? <div className="table-footer"><p>Rodomi {visibleDefects.length} iš {projectDefects.length} įrašų</p></div> : null}
             </div>
-
-            {visibleDefects.length > 20 ? <div className="table-footer"><p>Rodomi {visibleDefects.length} iš {projectDefects.length} įrašų</p></div> : null}
+            )}
           </section>
 
           <section className="print-report">
@@ -1875,6 +2285,14 @@ export default function Home({ initialData = null }: HomeProps) {
                 {fieldRows.length > 0 && <div className="print-field-rows">{fieldRows.map((row) => <p key={row.label}><strong>{row.label}:</strong> {row.value}</p>)}</div>}
                 {reportOptions.photos && photos.length > 0 && <div className="print-photo-grid">{photos.map((photo, index) => <figure key={photo.id}><img src={printPhotos[index] ?? photo.url} alt={`${defect.title}, nuotrauka ${index + 1}`} />{photo.caption && <figcaption>{photo.caption}</figcaption>}</figure>)}</div>}
                 {reportOptions.descriptions && <div className="print-issues">{items.map((item, index) => <div key={item.id}><b>{index + 1}</b><p>{reportOptions.descriptions && <><strong>{recordCopy[defect.recordType].issueLabel.replace(" *", "")}:</strong> {item.issue}<br /></>}{reportOptions.requiredWork && <><strong>{recordCopy[defect.recordType].workLabel}:</strong> {item.requiredWork || "Nenurodyta"}</>}</p></div>)}</div>}
+                {reportOptions.linkedTasks && (defect.childTasks ?? []).length > 0 && (
+                  <div className="print-linked-tasks">
+                    <strong>Susijusios užduotys</strong>
+                    <ul>
+                      {(defect.childTasks ?? []).map((task) => <li key={task.id}>{task.code} · {task.title} — {task.status}</li>)}
+                    </ul>
+                  </div>
+                )}
               </article>;
             })}
           </section>
@@ -1892,7 +2310,7 @@ export default function Home({ initialData = null }: HomeProps) {
           <>
             <button className="bottom-active" onClick={() => setTypeFilter("Visi")}><span>▦</span>Apžvalga</button>
             <button onClick={openProjectPicker}><span>□</span>Projektai</button>
-            <button className="mobile-capture" onClick={openCapture} aria-label="Naujas įrašas">＋</button>
+            <button className="mobile-capture" onClick={registerTab === "invoices" ? openInvoiceCapture : openCapture} aria-label={registerTab === "invoices" ? "Pridėti sąskaitą" : "Naujas įrašas"}>{registerTab === "invoices" ? "€" : "＋"}</button>
             <button onClick={() => setTypeFilter("Užduotis")}><span>✓</span>Užduotys</button>
             <button onClick={() => setReportMode(true)}><span>⇩</span>Ataskaitos</button>
           </>
@@ -1915,8 +2333,37 @@ export default function Home({ initialData = null }: HomeProps) {
                     <small>{recordTypeMeta[type].hint}</small>
                   </button>
                 ))}
+                {isStaff ? (
+                  <button type="button" onClick={() => chooseCaptureType("Sąskaita")}>
+                    <span>€</span>
+                    <strong>Sąskaita</strong>
+                    <small>PVM SF foto arba PDF</small>
+                  </button>
+                ) : null}
               </div>
             </section>
+          ) : captureStep === "invoice" ? (
+            <InvoiceCapture
+              projectId={resolvedProjectId}
+              projectName={activeProject.name}
+              saving={captureSaving}
+              setSaving={setCaptureSaving}
+              onBack={() => setCaptureStep("type")}
+              onClose={closeCapture}
+              showToast={showToast}
+              contactsRefreshKey={projectContactsRevision}
+              onEditProject={() => openEditProject(activeProject)}
+              initialFile={pendingInvoiceFile}
+              onInitialFileUsed={() => setPendingInvoiceFile(null)}
+              onSaved={(invoice) => {
+                setInvoices((items) => [invoice, ...items]);
+                setProjects((items) => items.map((project) => project.id === invoice.projectId ? {
+                  ...project,
+                  invoiceTotalCents: (project.invoiceTotalCents ?? 0) + invoice.amountCentsIncVat,
+                } : project));
+                setRegisterTab("invoices");
+              }}
+            />
           ) : (
           <form className="capture-panel" onSubmit={addDefect}>
             <div className="panel-handle" />
@@ -2037,7 +2484,7 @@ export default function Home({ initialData = null }: HomeProps) {
                       }}
                       onOtherTextChange={setCaptureResponsibleOther}
                     />
-                    <label><span>Terminas</span><input name="due" type="date" /></label>
+                    <label><span>Terminas</span><DateInput name="due" value={captureDueDate} onChange={setCaptureDueDate} /></label>
                   </div>
                 </section>
               </>
@@ -2106,11 +2553,38 @@ export default function Home({ initialData = null }: HomeProps) {
         <ProjectEdit
           project={projects.find((project) => project.id === editProjectId)!}
           saving={editProjectSaving}
+          currentUser={{
+            id: profile.id ?? "",
+            displayName: profile.displayName,
+            email: profile.email,
+            phone: profile.phone ?? "",
+          }}
           onClose={() => setEditProjectId(null)}
+          onOpenProfile={() => setProfileSettingsOpen(true)}
           onSave={saveEditedProject}
           onDelete={() => void deleteEditedProject()}
         />
       )}
+
+      <ProfileSettings
+        open={profileSettingsOpen}
+        profile={{
+          id: profile.id ?? "",
+          displayName: profile.displayName,
+          email: profile.email,
+          phone: profile.phone ?? "",
+          role: profile.role,
+        }}
+        onClose={() => setProfileSettingsOpen(false)}
+        onSaved={(next) => setProfile((current) => ({
+          ...current,
+          id: next.id,
+          displayName: next.displayName,
+          email: next.email,
+          phone: next.phone,
+        }))}
+        showToast={showToast}
+      />
 
       {inviteOpen && isStaff && (
         <div className="modal-layer project-modal-layer" role="dialog" aria-modal="true" aria-labelledby="invite-title">
@@ -2175,7 +2649,7 @@ export default function Home({ initialData = null }: HomeProps) {
                           <span className="thumb-play">▶</span>
                         </>
                       ) : (
-                        <span className="thumb-photo" style={{ backgroundImage: `url(${item.url})` }} />
+                        <span className="thumb-photo" style={item.thumbUrl ? { backgroundImage: `url(${item.thumbUrl})` } : undefined} />
                       )}
                     </button>
                     {can(profile, "delete_media") && !item.id.startsWith("legacy-") ? (
@@ -2243,12 +2717,17 @@ export default function Home({ initialData = null }: HomeProps) {
               />
               <label><span>Darbų vykdytojas</span><input value={detailMetaDraft.executor} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, executor: event.target.value } : draft)} placeholder="Pvz., montuotojai" /></label>
               <label><span>Prižiūri</span>
-                <select value={detailMetaDraft.supervisorId} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, supervisorId: event.target.value } : draft)}>
-                  <option value="">—</option>
-                  {staffUsers.map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}
-                </select>
+                <input
+                  list="detail-supervisor-suggestions"
+                  value={detailMetaDraft.supervisorName}
+                  onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, supervisorName: event.target.value } : draft)}
+                  placeholder="Pvz., projekto vadovas"
+                />
+                <datalist id="detail-supervisor-suggestions">
+                  {supervisorSuggestions.map((user) => <option key={user.id} value={user.display_name} />)}
+                </datalist>
               </label>
-              <label><span>Terminas</span><input type="date" value={detailMetaDraft.due === "Nenustatyta" ? "" : detailMetaDraft.due} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, due: event.target.value || "Nenustatyta" } : draft)} /></label>
+              <label><span>Terminas</span><DateInput value={detailMetaDraft.due === "Nenustatyta" ? "" : detailMetaDraft.due} onChange={(value) => setDetailMetaDraft((draft) => draft ? { ...draft, due: value || "Nenustatyta" } : draft)} /></label>
               <label><span>Būsena</span><select value={detailMetaDraft.status} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, status: event.target.value as Status } : draft)}>{statusList.map((item) => <option key={item}>{item}</option>)}</select></label>
               <label className="invite-toggle"><input type="checkbox" checked={detailMetaDraft.visibleToClient} onChange={(event) => setDetailMetaDraft((draft) => draft ? { ...draft, visibleToClient: event.target.checked } : draft)} /><span>Matoma užsakovui</span></label>
             </div>}
@@ -2295,6 +2774,22 @@ export default function Home({ initialData = null }: HomeProps) {
                             onClick={() => void saveChildTask(task.id)}
                           >
                             {childTaskSavingId === task.id ? "…" : "Išsaugoti"}
+                          </button>
+                          <button
+                            type="button"
+                            className="primary-button child-task-done-button"
+                            disabled={childTaskSavingId === task.id}
+                            onClick={() => void completeChildTask(task.id)}
+                          >
+                            Baigta
+                          </button>
+                          <button
+                            type="button"
+                            className="danger-button"
+                            disabled={childTaskSavingId === task.id}
+                            onClick={() => void deleteChildTask(task.id)}
+                          >
+                            Ištrinti
                           </button>
                         </li>
                       );
@@ -2368,8 +2863,16 @@ export default function Home({ initialData = null }: HomeProps) {
                     return <article key={item.id}>
                       <div className="report-preview-title"><div><small>{item.code} · {item.recordType}</small>{reportOptions.title && <h4>{item.title}</h4>}</div>{reportOptions.status && <span className={statusClass(item.status)}><i />{item.status}</span>}</div>
                       {fieldRows.length > 0 && <div className="report-preview-fields">{fieldRows.map((row) => <p key={row.label}><strong>{row.label}:</strong> {row.value}</p>)}</div>}
-                      {reportOptions.photos && photos.length > 0 && <div className="report-preview-photos">{photos.slice(0, 4).map((photo) => <img key={photo.id} src={photo.url} alt="" />)}{photos.length > 4 && <span>+{photos.length - 4}</span>}</div>}
+                      {reportOptions.photos && photos.length > 0 && <div className="report-preview-photos">{photos.slice(0, 4).map((photo) => photo.thumbUrl ? <img key={photo.id} src={photo.thumbUrl} alt="" loading="lazy" decoding="async" /> : <span key={photo.id} className="report-preview-photo-placeholder">Foto</span>)}{photos.length > 4 && <span>+{photos.length - 4}</span>}</div>}
                       {reportOptions.descriptions && <div className="report-preview-issues">{issues.map((issue, index) => <p key={issue.id}><b>{index + 1}.</b> {issue.issue}{reportOptions.requiredWork && issue.requiredWork && <small>Ką atlikti: {issue.requiredWork}</small>}</p>)}</div>}
+                      {reportOptions.linkedTasks && (item.childTasks ?? []).length > 0 && (
+                        <div className="report-preview-linked-tasks">
+                          <strong>Susijusios užduotys</strong>
+                          <ul>
+                            {(item.childTasks ?? []).map((task) => <li key={task.id}>{task.code} · {task.title} — {task.status}</li>)}
+                          </ul>
+                        </div>
+                      )}
                     </article>;
                   })}
                 </div>
@@ -2456,6 +2959,14 @@ export default function Home({ initialData = null }: HomeProps) {
           </section>
         </div>
       )}
+
+      {invoiceReportOpen && isStaff && resolvedProjectId ? (
+        <InvoiceReportModal
+          projectId={resolvedProjectId}
+          projectName={activeProject.name}
+          onClose={() => setInvoiceReportOpen(false)}
+        />
+      ) : null}
 
       {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
     </div>

@@ -1,11 +1,13 @@
 import { apiError, requireUser } from "@/lib/auth";
 import { MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES } from "@/lib/constants";
+import { mediaProxyUrl, mediaThumbUrl } from "@/lib/media-url";
 
 export const dynamic = "force-dynamic";
 
 type MediaPayload = {
   id?: string;
   objectKey?: string;
+  thumbObjectKey?: string;
   fileName?: string;
   mimeType?: string;
   mediaKind?: string;
@@ -33,6 +35,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const rows = incoming.map((item, index) => {
       const objectKey = String(item.objectKey ?? "");
       if (!objectKey.startsWith(prefix)) throw new Error("Netinkamas failo kelias");
+      const thumbObjectKey = String(item.thumbObjectKey ?? "").trim();
+      if (thumbObjectKey && !thumbObjectKey.startsWith(prefix)) throw new Error("Netinkamas miniatiūros kelias");
       const mediaKind = item.mediaKind === "video" ? "video" : "photo";
       const fileSize = Number(item.fileSize ?? 0);
       if (mediaKind === "photo" && fileSize > MAX_PHOTO_BYTES) throw new Error("Nuotrauka per didelė");
@@ -42,6 +46,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         id: uuidPattern.test(requestedId) ? requestedId : crypto.randomUUID(),
         record_id: id,
         object_key: objectKey,
+        thumb_object_key: thumbObjectKey || null,
         file_name: String(item.fileName ?? "").slice(0, 200),
         mime_type: String(item.mimeType ?? (mediaKind === "video" ? "video/mp4" : "image/jpeg")),
         media_kind: mediaKind,
@@ -68,16 +73,14 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       actor_name: profile.displayName,
     });
 
-    const media = await Promise.all((inserted ?? []).map(async (row) => {
-      const { data } = await supabase.storage.from("record-media").createSignedUrl(row.object_key, 60 * 60 * 12);
-      return {
-        id: row.id,
-        url: data?.signedUrl ?? `/api/media/${id}/${row.id}`,
-        caption: row.caption,
-        kind: row.media_kind === "video" ? "video" : "photo",
-        fileName: row.file_name,
-        objectKey: row.object_key,
-      };
+    const media = (inserted ?? []).map((row) => ({
+      id: row.id,
+      url: mediaProxyUrl(id, row.id),
+      thumbUrl: row.media_kind === "video" ? undefined : mediaThumbUrl(id, row.id),
+      caption: row.caption,
+      kind: row.media_kind === "video" ? "video" : "photo",
+      fileName: row.file_name,
+      objectKey: row.object_key,
     }));
     return Response.json({ media }, { status: 201 });
   } catch (error) {

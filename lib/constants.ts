@@ -101,3 +101,52 @@ export function isSuperAdminEmail(email: string) {
   const normalized = email.trim().toLocaleLowerCase();
   return (SUPER_ADMIN_EMAILS as readonly string[]).includes(normalized);
 }
+
+export const INVOICE_CATEGORIES = [
+  "brokas",
+  "papildomos_islaidos",
+  "montavimas",
+  "transportas",
+  "siuksles",
+  "uznesimas",
+] as const;
+
+export type InvoiceCategory = (typeof INVOICE_CATEGORIES)[number];
+
+export const INVOICE_CATEGORY_LABELS: Record<InvoiceCategory, string> = {
+  brokas: "Brokas",
+  papildomos_islaidos: "Papildomos išlaidos",
+  montavimas: "Montavimo darbai",
+  transportas: "Transportas",
+  siuksles: "Šiukšlių išvežimas",
+  uznesimas: "Užnešimo paslaugos",
+};
+
+export const INVOICE_CHARGED_TO = [
+  "distyle",
+  "uzsakovas",
+  "gamintojas",
+  "montuotojas",
+  "kita",
+] as const;
+
+export type InvoiceChargedTo = (typeof INVOICE_CHARGED_TO)[number];
+
+export const INVOICE_CHARGED_TO_LABELS: Record<InvoiceChargedTo, string> = {
+  distyle: "Distyle",
+  uzsakovas: "Užsakovas",
+  gamintojas: "Gamintojas",
+  montuotojas: "Montuotojai",
+  kita: "Kita",
+};
+
+export const INVOICE_OCR_STATUSES = ["ok", "partial", "failed", "skipped"] as const;
+export type InvoiceOcrStatus = (typeof INVOICE_OCR_STATUSES)[number];
+
+export function isInvoiceCategory(value: string): value is InvoiceCategory {
+  return (INVOICE_CATEGORIES as readonly string[]).includes(value);
+}
+
+export function isInvoiceChargedTo(value: string): value is InvoiceChargedTo {
+  return (INVOICE_CHARGED_TO as readonly string[]).includes(value);
+}
