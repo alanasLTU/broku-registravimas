@@ -1033,7 +1033,18 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   .mobile-bottom-nav button > span { font-size: 17px; }
   .mobile-bottom-nav .bottom-active { color: var(--ink); font-weight: 700; }
   .mobile-bottom-nav .mobile-capture { width: 48px; height: 48px; margin: -22px auto 0; border: 5px solid var(--canvas); border-radius: 16px; background: var(--accent); color: white; box-shadow: 0 5px 15px rgba(230,92,79,.22); font-size: 25px; }
-  .capture-panel { align-self: flex-end; width: 100%; height: min(94dvh, 860px); padding: 12px 17px calc(18px + env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; animation-name: slideUp; }
+  .modal-layer {
+    align-items: flex-end;
+    justify-content: stretch;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  .project-modal-layer {
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .capture-panel { align-self: flex-end; width: 100%; max-width: 100%; min-width: 0; height: min(94dvh, 860px); padding: 12px 17px calc(18px + env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; animation-name: slideUp; box-shadow: 0 -18px 50px rgba(20,31,27,.16); }
   .capture-panel.capture-type-step { height: auto; max-height: min(92dvh, 720px); }
   .capture-type-grid { grid-template-columns: 1fr; gap: 8px; }
   .capture-type-grid button { min-height: 76px; }
@@ -1409,7 +1420,31 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
 .metrics-with-spend { grid-template-columns: repeat(4, 1fr); }
 .metric-spend { grid-column: 1 / -1; }
 .register-tabs { margin-bottom: 0; }
-.invoice-capture-hint { margin: 12px 0 0; color: #76817c; font-size: 13px; }
+.invoice-capture-hint { margin: 0 0 12px; color: #76817c; font-size: 13px; }
+.invoice-capture-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.invoice-capture-panel .capture-panel-head {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.invoice-capture-panel .capture-panel-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+.invoice-capture-panel .capture-panel-footer {
+  flex: 0 0 auto;
+  min-width: 0;
+}
 .invoice-tab-actions { display: none; gap: 8px; padding: 10px 14px 0; }
 .invoice-tab-actions .secondary-button,
 .invoice-tab-actions .primary-button { min-height: 44px; }
@@ -1682,8 +1717,34 @@ button.drawer-media-action:nth-child(4) b { color: #3d8062; }
   .register-card.register-invoices-tab .register-header { min-height: auto; padding-bottom: 8px; }
   .register-card.register-invoices-tab .invoice-cards,
   .register-card.register-invoices-tab .invoice-empty { padding: 10px 14px 16px; }
-  .invoice-capture-panel { max-height: min(94dvh, 860px); overflow-y: auto; -webkit-overflow-scrolling: touch; }
-  .invoice-capture-panel .panel-actions { position: sticky; bottom: 0; z-index: 2; margin-top: 12px; padding-top: 12px; border-top: 1px solid #eef0ee; background: white; }
+  .invoice-capture-panel {
+    height: min(94dvh, 860px);
+    max-height: min(94dvh, 860px);
+    padding: 12px 17px 0;
+    overflow: hidden;
+  }
+  .invoice-capture-panel .capture-panel-head { padding-bottom: 4px; }
+  .invoice-capture-panel .capture-panel-scroll { padding-bottom: 8px; }
+  .invoice-capture-panel .capture-panel-footer.panel-actions {
+    margin: 0 -17px;
+    padding: 12px 17px calc(18px + env(safe-area-inset-bottom));
+    border-top: 1px solid #eef0ee;
+    background: white;
+  }
+  .invoice-capture-panel .capture-panel-footer .primary-button,
+  .invoice-capture-panel .capture-panel-footer .secondary-button { flex: 1; min-height: 44px; }
+  .invoice-capture-panel .project-contacts-bar { margin-bottom: 10px; }
+  .invoice-capture-panel .project-contacts-bar-head { flex-wrap: wrap; }
+  .invoice-capture-panel .project-contacts-bar-grid { grid-template-columns: 1fr; }
+  .invoice-capture-panel .invoice-chip-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .invoice-capture-panel .invoice-chip-grid button { width: 100%; text-align: center; }
+  .invoice-capture-panel .invoice-file-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .invoice-capture-panel .invoice-preview-pdf strong,
+  .invoice-capture-panel .invoice-drop-empty strong { overflow-wrap: anywhere; word-break: break-word; }
   .invoice-drawer-layer { align-items: flex-end; }
   .invoice-drawer-layer .invoice-drawer {
     width: 100%;

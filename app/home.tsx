@@ -634,9 +634,12 @@ export default function Home({ initialData = null }: HomeProps) {
     if (!modalOpen) return;
     const { body } = document;
     const previousOverflow = body.style.overflow;
+    const previousOverflowX = body.style.overflowX;
     body.style.overflow = "hidden";
+    body.style.overflowX = "hidden";
     return () => {
       body.style.overflow = previousOverflow;
+      body.style.overflowX = previousOverflowX;
     };
   }, [captureOpen, completeOpen, detailId, editProjectId, filtersOpen, inviteOpen, mediaViewerIndex, newProjectOpen, photoEditorTarget, profileSettingsOpen, projectPickerOpen, reportMode]);
 

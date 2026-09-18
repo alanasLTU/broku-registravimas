@@ -228,148 +228,151 @@ export default function InvoiceCapture({
       }}
       onDrop={handleInvoiceDrop}
     >
-      <div className="panel-handle" />
-      <div className="panel-title">
-        <div><span>Nauja sąskaita</span><h2 id="capture-title">PVM SF</h2></div>
-        <button type="button" onClick={onClose} aria-label="Uždaryti">×</button>
+      <div className="capture-panel-head">
+        <div className="panel-handle" />
+        <div className="panel-title">
+          <div><span>Nauja sąskaita</span><h2 id="capture-title">PVM SF</h2></div>
+          <button type="button" onClick={onClose} aria-label="Uždaryti">×</button>
+        </div>
+        <button type="button" className="capture-back" onClick={onBack}>← Keisti tipą</button>
+        <div className="capture-project">
+          <span className="live-dot" />
+          <div><small>Objektas</small><strong>{projectName}</strong></div>
+        </div>
+        <ProjectContactsBar
+          projectId={projectId}
+          refreshKey={contactsRefreshKey}
+          showEdit={Boolean(onEditProject)}
+          defaultCollapsed
+          onEdit={() => onEditProject?.()}
+        />
       </div>
-      <button type="button" className="capture-back" onClick={onBack}>← Keisti tipą</button>
-      <div className="capture-project">
-        <span className="live-dot" />
-        <div><small>Objektas</small><strong>{projectName}</strong></div>
-      </div>
 
-      <ProjectContactsBar
-        projectId={projectId}
-        refreshKey={contactsRefreshKey}
-        showEdit={Boolean(onEditProject)}
-        onEdit={() => onEditProject?.()}
-      />
+      <div className="capture-panel-scroll">
+        <p className="invoice-capture-hint">Viena sąskaita, visas lapas, be šešėlio.</p>
 
-      <p className="invoice-capture-hint">Viena sąskaita, visas lapas, be šešėlio.</p>
+        <section className="invoice-file-block">
+          {previewUrl ? (
+            <div className="invoice-preview-wrap">
+              <img src={previewUrl} alt="Sąskaitos peržiūra" className={`invoice-preview-image${parseLoading ? " invoice-preview-dimmed" : ""}`} />
+              {parseLoading ? (
+                <div className="invoice-preview-loading" role="status" aria-live="polite">
+                  <span className="sync-refresh-icon is-spinning" aria-hidden>↻</span>
+                  <strong>Skaitome duomenis iš SF</strong>
+                  <small>Palaukite kelias sekundes…</small>
+                </div>
+              ) : null}
+            </div>
+          ) : file ? (
+            <div className="invoice-preview-pdf"><strong>{file.name}</strong><span>PDF failas</span></div>
+          ) : (
+            <div className="invoice-drop-empty">
+              <span aria-hidden>⇩</span>
+              <div>
+                <strong>Nutempkite SF failą čia</strong>
+                <small>Nuotrauka (JPG, PNG) arba PDF iš kompiuterio</small>
+              </div>
+            </div>
+          )}
+          <div className={`invoice-file-actions${parseLoading ? " invoice-file-actions-disabled" : ""}`}>
+            <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" capture="environment" disabled={parseLoading || saving} onFiles={(files) => void handleFile(files[0])}>
+              <b>◎</b><span>Fotografuoti</span>
+            </MediaFileButton>
+            <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" disabled={parseLoading || saving} onFiles={(files) => void handleFile(files[0])}>
+              <b>⇧</b><span>Iš galerijos</span>
+            </MediaFileButton>
+            <MediaFileButton className="photo-add-tile photo-upload-tile" accept="application/pdf,.pdf" disabled={parseLoading || saving} onFiles={(files) => void handleFile(files[0])}>
+              <b>PDF</b><span>PDF failas</span>
+            </MediaFileButton>
+          </div>
+          {file || previewUrl ? (
+            <p className="invoice-drop-hint">Arba nutempkite kitą failą — pakeis dabartinį</p>
+          ) : null}
+        </section>
 
-      <section className="invoice-file-block">
-        {previewUrl ? (
-          <div className="invoice-preview-wrap">
-            <img src={previewUrl} alt="Sąskaitos peržiūra" className={`invoice-preview-image${parseLoading ? " invoice-preview-dimmed" : ""}`} />
-            {parseLoading ? (
-              <div className="invoice-preview-loading" role="status" aria-live="polite">
-                <span className="sync-refresh-icon is-spinning" aria-hidden>↻</span>
-                <strong>Skaitome duomenis iš SF</strong>
-                <small>Palaukite kelias sekundes…</small>
+        {parseLoading ? (
+          <div className="invoice-parse-banner" role="status" aria-live="polite">
+            <span className="sync-refresh-icon is-spinning" aria-hidden>↻</span>
+            <div>
+              <strong>Krauname duomenis iš sąskaitos</strong>
+              <span>Tiekėjas, SF nr., data ir sumos bus užpildyti automatiškai</span>
+            </div>
+          </div>
+        ) : null}
+
+        <fieldset className="invoice-form-body" disabled={parseLoading || saving}>
+          <div className="form-grid capture-essentials invoice-fields">
+            <label className="wide"><span>Tiekėjas *</span><input value={fields.supplierName} onChange={(event) => setFields((current) => ({ ...current, supplierName: event.target.value }))} required /></label>
+            <label><span>SF nr. *</span><input value={fields.invoiceNumber} onChange={(event) => setFields((current) => ({ ...current, invoiceNumber: event.target.value }))} required /></label>
+            <label><span>SF data *</span><DateInput value={fields.invoiceDate} onChange={(value) => setFields((current) => ({ ...current, invoiceDate: value }))} required /></label>
+            <label><span>Suma be PVM *</span><input inputMode="decimal" value={fields.amountExVat} onChange={(event) => setFields((current) => ({ ...current, amountExVat: event.target.value }))} required /></label>
+            <label><span>Suma su PVM *</span><input inputMode="decimal" value={fields.amountIncVat} onChange={(event) => setFields((current) => ({ ...current, amountIncVat: event.target.value }))} required /></label>
+          </div>
+
+          <section className="invoice-notes-section">
+            <div className="invoice-notes-head">
+              <strong>Komentaras *</strong>
+              <span>Privaloma — trumpai aprašykite, už ką ši sąskaita</span>
+            </div>
+            <textarea
+              className="invoice-notes-input"
+              value={notes}
+              onChange={(event) => setNotes(event.target.value.slice(0, 500))}
+              rows={3}
+              required
+              placeholder="Pvz.: medžiagos broko taisymui, transportas į objektą, papildomas montavimas…"
+            />
+          </section>
+
+          <section className="invoice-chip-section">
+            <strong>Kategorija</strong>
+            <div className="invoice-chip-grid">
+              {INVOICE_CATEGORIES.map((item) => (
+                <button key={item} type="button" className={category === item ? "invoice-chip-active" : ""} onClick={() => setCategory(item)}>
+                  {INVOICE_CATEGORY_LABELS[item]}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="invoice-chip-section">
+            <strong>Kam priskiriama</strong>
+            <div className="invoice-chip-grid">
+              {INVOICE_CHARGED_TO.map((item) => (
+                <button key={item} type="button" className={chargedTo === item ? "invoice-chip-active" : ""} onClick={() => setChargedTo(item)}>
+                  {INVOICE_CHARGED_TO_LABELS[item]}
+                </button>
+              ))}
+            </div>
+            {chargedTo === "kita" ? (
+              <div className="invoice-charged-other-section">
+                <div className="invoice-notes-head">
+                  <strong>Kam dar priskiriama? *</strong>
+                  <span>Įrašykite įmonę ar asmenį — privaloma, kai pasirinkta „Kita“</span>
+                </div>
+                <input
+                  className="invoice-charged-other-input"
+                  value={chargedToOther}
+                  onChange={(event) => setChargedToOther(event.target.value.slice(0, 200))}
+                  required
+                  placeholder="Pvz.: Subrangovas, kliento atstovas, tiekėjas…"
+                />
               </div>
             ) : null}
+          </section>
+        </fieldset>
+
+        {!canSubmit && !parseLoading && !saving ? (
+          <div className="invoice-submit-hint" role="status">
+            <strong>Kodėl dar negalima išsaugoti</strong>
+            <ul>
+              {submitIssues.map((issue) => <li key={issue}>{issue}</li>)}
+            </ul>
           </div>
-        ) : file ? (
-          <div className="invoice-preview-pdf"><strong>{file.name}</strong><span>PDF failas</span></div>
-        ) : (
-          <div className="invoice-drop-empty">
-            <span aria-hidden>⇩</span>
-            <div>
-              <strong>Nutempkite SF failą čia</strong>
-              <small>Nuotrauka (JPG, PNG) arba PDF iš kompiuterio</small>
-            </div>
-          </div>
-        )}
-        <div className={`invoice-file-actions${parseLoading ? " invoice-file-actions-disabled" : ""}`}>
-          <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" capture="environment" disabled={parseLoading || saving} onFiles={(files) => void handleFile(files[0])}>
-            <b>◎</b><span>Fotografuoti</span>
-          </MediaFileButton>
-          <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" disabled={parseLoading || saving} onFiles={(files) => void handleFile(files[0])}>
-            <b>⇧</b><span>Iš galerijos</span>
-          </MediaFileButton>
-          <MediaFileButton className="photo-add-tile photo-upload-tile" accept="application/pdf,.pdf" disabled={parseLoading || saving} onFiles={(files) => void handleFile(files[0])}>
-            <b>PDF</b><span>PDF failas</span>
-          </MediaFileButton>
-        </div>
-        {file || previewUrl ? (
-          <p className="invoice-drop-hint">Arba nutempkite kitą failą — pakeis dabartinį</p>
         ) : null}
-      </section>
-
-      {parseLoading ? (
-        <div className="invoice-parse-banner" role="status" aria-live="polite">
-          <span className="sync-refresh-icon is-spinning" aria-hidden>↻</span>
-          <div>
-            <strong>Krauname duomenis iš sąskaitos</strong>
-            <span>Tiekėjas, SF nr., data ir sumos bus užpildyti automatiškai</span>
-          </div>
-        </div>
-      ) : null}
-
-      <fieldset className="invoice-form-body" disabled={parseLoading || saving}>
-      <div className="form-grid capture-essentials invoice-fields">
-        <label className="wide"><span>Tiekėjas *</span><input value={fields.supplierName} onChange={(event) => setFields((current) => ({ ...current, supplierName: event.target.value }))} required /></label>
-        <label><span>SF nr. *</span><input value={fields.invoiceNumber} onChange={(event) => setFields((current) => ({ ...current, invoiceNumber: event.target.value }))} required /></label>
-        <label><span>SF data *</span><DateInput value={fields.invoiceDate} onChange={(value) => setFields((current) => ({ ...current, invoiceDate: value }))} required /></label>
-        <label><span>Suma be PVM *</span><input inputMode="decimal" value={fields.amountExVat} onChange={(event) => setFields((current) => ({ ...current, amountExVat: event.target.value }))} required /></label>
-        <label><span>Suma su PVM *</span><input inputMode="decimal" value={fields.amountIncVat} onChange={(event) => setFields((current) => ({ ...current, amountIncVat: event.target.value }))} required /></label>
       </div>
 
-      <section className="invoice-notes-section">
-        <div className="invoice-notes-head">
-          <strong>Komentaras *</strong>
-          <span>Privaloma — trumpai aprašykite, už ką ši sąskaita</span>
-        </div>
-        <textarea
-          className="invoice-notes-input"
-          value={notes}
-          onChange={(event) => setNotes(event.target.value.slice(0, 500))}
-          rows={3}
-          required
-          placeholder="Pvz.: medžiagos broko taisymui, transportas į objektą, papildomas montavimas…"
-        />
-      </section>
-
-      <section className="invoice-chip-section">
-        <strong>Kategorija</strong>
-        <div className="invoice-chip-grid">
-          {INVOICE_CATEGORIES.map((item) => (
-            <button key={item} type="button" className={category === item ? "invoice-chip-active" : ""} onClick={() => setCategory(item)}>
-              {INVOICE_CATEGORY_LABELS[item]}
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="invoice-chip-section">
-        <strong>Kam priskiriama</strong>
-        <div className="invoice-chip-grid">
-          {INVOICE_CHARGED_TO.map((item) => (
-            <button key={item} type="button" className={chargedTo === item ? "invoice-chip-active" : ""} onClick={() => setChargedTo(item)}>
-              {INVOICE_CHARGED_TO_LABELS[item]}
-            </button>
-          ))}
-        </div>
-        {chargedTo === "kita" ? (
-          <div className="invoice-charged-other-section">
-            <div className="invoice-notes-head">
-              <strong>Kam dar priskiriama? *</strong>
-              <span>Įrašykite įmonę ar asmenį — privaloma, kai pasirinkta „Kita“</span>
-            </div>
-            <input
-              className="invoice-charged-other-input"
-              value={chargedToOther}
-              onChange={(event) => setChargedToOther(event.target.value.slice(0, 200))}
-              required
-              autoFocus
-              placeholder="Pvz.: Subrangovas, kliento atstovas, tiekėjas…"
-            />
-          </div>
-        ) : null}
-      </section>
-      </fieldset>
-
-      {!canSubmit && !parseLoading && !saving ? (
-        <div className="invoice-submit-hint" role="status">
-          <strong>Kodėl dar negalima išsaugoti</strong>
-          <ul>
-            {submitIssues.map((issue) => <li key={issue}>{issue}</li>)}
-          </ul>
-        </div>
-      ) : null}
-
-      <div className="panel-actions">
+      <div className="capture-panel-footer panel-actions">
         <button type="button" className="secondary-button" onClick={onClose} disabled={saving || parseLoading}>Atšaukti</button>
         <button type="submit" className="primary-button" disabled={saving || parseLoading}>{saving ? "Saugoma…" : parseLoading ? "Skaitoma SF…" : "Išsaugoti sąskaitą"}</button>
       </div>

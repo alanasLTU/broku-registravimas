@@ -15,6 +15,7 @@ type Props = {
   projectId: string;
   refreshKey?: number;
   showEdit?: boolean;
+  defaultCollapsed?: boolean;
   onEdit: () => void;
 };
 
@@ -22,9 +23,9 @@ function roleLabel(role: string) {
   return PROJECT_CONTACT_ROLE_LABELS[role as ProjectContactRole] ?? role;
 }
 
-export default function ProjectContactsBar({ projectId, refreshKey = 0, showEdit = true, onEdit }: Props) {
+export default function ProjectContactsBar({ projectId, refreshKey = 0, showEdit = true, defaultCollapsed = false, onEdit }: Props) {
   const [contacts, setContacts] = useState<ContactView[]>([]);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
 
   useEffect(() => {
     if (!projectId) {
