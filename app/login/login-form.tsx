@@ -2,8 +2,25 @@
 
 import { FormEvent, useState } from "react";
 
-export default function LoginForm({ invite, join, email: emailFromLink = "" }: { invite: string; join: string; email?: string }) {
+type Props = {
+  invite: string;
+  join: string;
+  email?: string;
+  inviteStatus?: "open" | "invalid" | "";
+  inviteProjectName?: string;
+  inviteUsed?: boolean;
+};
+
+export default function LoginForm({
+  invite,
+  join,
+  email: emailFromLink = "",
+  inviteStatus = "",
+  inviteUsed = false,
+}: Props) {
   const guestFlow = Boolean(invite || join);
+  const registerFlow = guestFlow && !inviteUsed && inviteStatus !== "invalid";
+  const lockEmail = Boolean(invite && inviteStatus === "open" && emailFromLink);
   const [email, setEmail] = useState(emailFromLink);
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<"idle" | "working" | "error">("idle");
@@ -19,7 +36,12 @@ export default function LoginForm({ invite, join, email: emailFromLink = "" }: {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ email: email.trim(), password }),
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+          inviteToken: invite || undefined,
+          joinToken: join || undefined,
+        }),
       });
       const raw = await prepare.text();
       let prepared: { error?: string; access_token?: string; refresh_token?: string } = {};
@@ -40,7 +62,7 @@ export default function LoginForm({ invite, join, email: emailFromLink = "" }: {
       }
       const next = join
         ? `/?join=${encodeURIComponent(join)}`
-        : invite
+        : invite && !inviteUsed
           ? `/?invite=${encodeURIComponent(invite)}`
           : "/";
       window.location.assign(next);
@@ -52,19 +74,39 @@ export default function LoginForm({ invite, join, email: emailFromLink = "" }: {
 
   return (
     <>
-      {join ? <p className="login-invite">Kvietimas fiksuoti brokus objekte. Prisijungę automatiškai pateksite į projektą.</p> : null}
-      {invite ? <p className="login-invite">Asmeninis kvietimas. Prisijunkite tuo pačiu el. paštu, kuriam nuoroda skirta.</p> : null}
+      {join ? <p className="login-invite">Bendroji nuoroda į objektą. Prisijungę automatiškai pateksite į projektą.</p> : null}
+      {invite && !inviteUsed ? (
+        <p className="login-invite">
+          Asmeninis kvietimas. {lockEmail ? "El. paštas užrakintas pagal nuorodą." : "Naudokite el. paštą, kuriam nuoroda skirta."}
+        </p>
+      ) : null}
       <form className="login-form" onSubmit={submit} noValidate>
         <label>
           <span>El. paštas</span>
-          <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" placeholder="jusu@imone.lt" />
+          <input
+            type="email"
+            required
+            value={email}
+            readOnly={lockEmail}
+            onChange={(event) => setEmail(event.target.value)}
+            autoComplete="email"
+            placeholder="jusu@imone.lt"
+          />
         </label>
         <label>
           <span>Slaptažodis</span>
-          <input type="password" required minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={guestFlow ? "new-password" : "current-password"} placeholder="Bent 6 simboliai" />
+          <input
+            type="password"
+            required
+            minLength={6}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete={registerFlow ? "new-password" : "current-password"}
+            placeholder="Bent 6 simboliai"
+          />
         </label>
         <button className="primary-button" type="submit" disabled={status === "working"}>
-          {status === "working" ? "Jungiamasi…" : guestFlow ? "Prisijungti / registruotis" : "Prisijungti"}
+          {status === "working" ? "Jungiamasi…" : registerFlow ? "Prisijungti / registruotis" : "Prisijungti"}
         </button>
         {message ? <p className="login-error">{message}</p> : null}
       </form>

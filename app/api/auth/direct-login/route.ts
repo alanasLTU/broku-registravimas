@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { lookupInviteToken } from "@/lib/invites";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { createServerSupabase } from "@/lib/supabase/server";
 import { isSuperAdminEmail } from "@/lib/constants";
@@ -78,9 +79,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Trūksta SUPABASE_SERVICE_ROLE_KEY faile .env.local." }, { status: 500 });
   }
 
-  const payload = await request.json() as { email?: string; password?: string };
+  const payload = await request.json() as { email?: string; password?: string; inviteToken?: string; joinToken?: string };
   const email = payload.email?.trim().toLocaleLowerCase() ?? "";
   const password = payload.password ?? "";
+  const inviteToken = payload.inviteToken?.trim() ?? "";
+  const joinToken = payload.joinToken?.trim() ?? "";
   if (!email.includes("@") || password.length < 6) {
     return NextResponse.json({ error: "Įveskite el. paštą ir slaptažodį (bent 6 simboliai)." }, { status: 400 });
   }
@@ -88,6 +91,33 @@ export async function POST(request: Request) {
   try {
     const supabase = await createServerSupabase();
     const isSeed = email === SEED_STAFF_EMAIL;
+    let allowRegister = !inviteToken && !joinToken;
+
+    if (inviteToken) {
+      const lookup = await lookupInviteToken(admin, inviteToken);
+      if (lookup.status === "invalid") {
+        return NextResponse.json({ error: "Kvietimo nuoroda nebegalioja." }, { status: 400 });
+      }
+      if (lookup.status === "used") {
+        allowRegister = false;
+      } else if (lookup.email !== email) {
+        return NextResponse.json({
+          error: `Šis kvietimas skirtas el. paštui ${lookup.email}. Naudokite tą patį adresą arba paprašykite naujos nuorodos.`,
+        }, { status: 400 });
+      } else {
+        allowRegister = true;
+      }
+    } else if (joinToken) {
+      const { data: project } = await admin
+        .from("projects")
+        .select("id")
+        .eq("share_token", joinToken)
+        .maybeSingle();
+      if (!project) {
+        return NextResponse.json({ error: "Bendroji nuoroda nebegalioja." }, { status: 400 });
+      }
+      allowRegister = true;
+    }
 
     if (isSeed && password.toLocaleLowerCase() !== SEED_STAFF_PASSWORD.toLocaleLowerCase()) {
       return NextResponse.json({ error: "Neteisingas slaptažodis." }, { status: 400 });
@@ -119,11 +149,17 @@ export async function POST(request: Request) {
     }
 
     // Guest register: create account only when credentials are invalid (user likely missing).
-    if (auth.error && !isSeed && isInvalidCredentials(auth.error.message)) {
+    if (auth.error && !isSeed && allowRegister && isInvalidCredentials(auth.error.message)) {
       const created = await createConfirmedUser(admin, email, password);
       if (created) {
         auth = await supabase.auth.signInWithPassword({ email, password });
       }
+    }
+
+    if (auth.error && inviteToken && !allowRegister && isInvalidCredentials(auth.error.message)) {
+      return NextResponse.json({
+        error: "Kvietimas jau panaudotas. Prisijunkite su savo slaptažodžiu — naują paskyrą kurti nebereikia.",
+      }, { status: 400 });
     }
 
     if (auth.error || !auth.data.session || !auth.data.user) {

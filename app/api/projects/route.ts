@@ -1,5 +1,6 @@
 import { apiError, requirePermission, requireUser } from "@/lib/auth";
 import { ACTIVE_PROJECT_STATUS, COMPLETED_PROJECT_STATUS, isProjectCompleted, normalizeProjectStatus, projectStatuses } from "@/lib/constants";
+import { deleteProjectCompletely } from "@/lib/project-delete";
 
 export const dynamic = "force-dynamic";
 
@@ -54,7 +55,7 @@ export async function PATCH(request: Request) {
   try {
     const { supabase, profile } = await requireUser();
     requirePermission(profile, "manage_projects");
-    const payload = await request.json() as { id?: string; name?: string; address?: string; status?: string; clientsSeeStaffRecords?: boolean };
+    const payload = await request.json() as { id?: string; name?: string; address?: string; status?: string; archived?: boolean; clientsSeeStaffRecords?: boolean };
     if (!payload.id) return Response.json({ error: "Nenurodytas projektas." }, { status: 400 });
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (typeof payload.name === "string") {
@@ -64,7 +65,10 @@ export async function PATCH(request: Request) {
     }
     if (typeof payload.address === "string") updates.address = payload.address.trim().slice(0, 300);
     if (typeof payload.clientsSeeStaffRecords === "boolean") updates.clients_see_staff_records = payload.clientsSeeStaffRecords;
-    if (typeof payload.status === "string" && (projectStatuses as readonly string[]).includes(payload.status)) {
+    if (typeof payload.archived === "boolean") {
+      updates.archived = payload.archived;
+      updates.status = payload.archived ? COMPLETED_PROJECT_STATUS : ACTIVE_PROJECT_STATUS;
+    } else if (typeof payload.status === "string" && (projectStatuses as readonly string[]).includes(payload.status)) {
       const status = normalizeProjectStatus(payload.status);
       updates.status = status;
       updates.archived = status === COMPLETED_PROJECT_STATUS;
@@ -79,12 +83,13 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const { supabase, profile } = await requireUser();
-    requirePermission(profile, "delete_records");
+    const { supabase, profile, admin } = await requireUser();
+    requirePermission(profile, "manage_projects");
     const id = new URL(request.url).searchParams.get("id")?.trim() ?? "";
     if (!id) return Response.json({ error: "Nenurodytas projektas." }, { status: 400 });
-    const { error } = await supabase.from("projects").delete().eq("id", id);
-    if (error) throw error;
+
+    const db = admin ?? supabase;
+    await deleteProjectCompletely(db, id);
     return Response.json({ ok: true });
   } catch (error) {
     return apiError(error);

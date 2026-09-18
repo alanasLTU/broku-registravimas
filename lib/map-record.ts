@@ -36,6 +36,15 @@ export type RecordRow = {
   archived?: boolean;
   archived_at?: string | null;
   version: number;
+  plan_id?: string | null;
+  plan_x?: number | null;
+  plan_y?: number | null;
+  completion_requested_by?: string | null;
+  completion_requested_at?: string | null;
+  completion_requested_name?: string | null;
+  completion_approved_by?: string | null;
+  completion_approved_at?: string | null;
+  completion_approved_name?: string | null;
 };
 
 type ItemRow = { id: string; record_id: string; issue: string; required_work: string };
@@ -119,6 +128,15 @@ export function mapRecord(
     resolution: record.resolution,
     version: record.version,
     childTasks: extras?.childTasks ?? [],
+    planId: record.plan_id ?? null,
+    planX: record.plan_x == null ? null : Number(record.plan_x),
+    planY: record.plan_y == null ? null : Number(record.plan_y),
+    completionRequestedBy: record.completion_requested_by ?? null,
+    completionRequestedAt: record.completion_requested_at ?? null,
+    completionRequestedName: record.completion_requested_name?.trim() || "",
+    completionApprovedBy: record.completion_approved_by ?? null,
+    completionApprovedAt: record.completion_approved_at ?? null,
+    completionApprovedName: record.completion_approved_name?.trim() || "",
   };
 }
 

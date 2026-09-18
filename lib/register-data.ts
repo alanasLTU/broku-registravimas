@@ -19,7 +19,7 @@ export async function loadRegisterPayload() {
     supabase
       .from("records")
       .select(
-        "id, code, project_id, record_type, title, room, zone, description, origin, priority, status, responsible, assignee, executor, supervisor_id, supervisor_name, parent_record_id, due_date, requested_by, price_cents, notes, required_work, resolution, include_in_report, visible_to_client, notify_responsible, created_by_email, created_by_name, created_at, archived, archived_at, version",
+        "id, code, project_id, record_type, title, room, zone, description, origin, priority, status, responsible, assignee, executor, supervisor_id, supervisor_name, parent_record_id, due_date, requested_by, price_cents, notes, required_work, resolution, include_in_report, visible_to_client, notify_responsible, created_by_email, created_by_name, created_at, archived, archived_at, version, plan_id, plan_x, plan_y, completion_requested_by, completion_requested_at, completion_requested_name, completion_approved_by, completion_approved_at, completion_approved_name",
       )
       .order("created_at", { ascending: false }),
     staff
@@ -27,7 +27,21 @@ export async function loadRegisterPayload() {
       : Promise.resolve({ data: [], error: null }),
   ]);
   if (projectError) throw projectError;
-  if (recordError) throw recordError;
+  let recordsLoaded = (recordRows ?? []) as Array<Record<string, unknown> & { id: string; parent_record_id?: string | null; supervisor_id?: string | null; supervisor_name?: string | null }>;
+  if (recordError) {
+    const message = recordError.message?.toLowerCase() ?? "";
+    const missingPlan = message.includes("plan_");
+    const missingCompletion = message.includes("completion_");
+    if (!missingPlan && !missingCompletion) throw recordError;
+    const fallback = await supabase
+      .from("records")
+      .select(
+        "id, code, project_id, record_type, title, room, zone, description, origin, priority, status, responsible, assignee, executor, supervisor_id, supervisor_name, parent_record_id, due_date, requested_by, price_cents, notes, required_work, resolution, include_in_report, visible_to_client, notify_responsible, created_by_email, created_by_name, created_at, archived, archived_at, version",
+      )
+      .order("created_at", { ascending: false });
+    if (fallback.error) throw fallback.error;
+    recordsLoaded = (fallback.data ?? []) as typeof recordsLoaded;
+  }
   if (invoiceQuery.error) {
     const message = invoiceQuery.error.message?.toLowerCase() ?? "";
     const missingInvoices = message.includes("invoices")
@@ -37,7 +51,7 @@ export async function loadRegisterPayload() {
     }
   }
 
-  const topLevelRows = (recordRows ?? []).filter((row) => !row.parent_record_id);
+  const topLevelRows = (recordsLoaded ?? []).filter((row) => !row.parent_record_id);
   const recordIds = topLevelRows.map((row) => row.id);
   const supervisorIds = [...new Set(topLevelRows.map((row) => row.supervisor_id).filter(Boolean))] as string[];
 
@@ -48,7 +62,7 @@ export async function loadRegisterPayload() {
     recordIds.length
       ? supabase
           .from("record_media")
-          .select("id, record_id, object_key, thumb_object_key, file_name, mime_type, media_kind, sort_order")
+          .select("id, record_id, object_key, thumb_object_key, file_name, mime_type, media_kind, caption, sort_order")
           .in("record_id", recordIds)
           .order("sort_order")
       : Promise.resolve({ data: [] }),

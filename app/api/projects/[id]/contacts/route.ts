@@ -16,6 +16,7 @@ type ContactPayload = {
   category?: string;
   workScope?: string;
   notifyEmail?: boolean;
+  approvesCompletion?: boolean;
 };
 
 const ROLE_KEYS = new Set(["site_contact", "project_manager", "works_manager", "coordinator", "manufacturer", "installer"]);
@@ -103,6 +104,7 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
       if (!contactId) continue;
       keptContactIds.push(contactId);
       const notifyDefault = ROLE_KEYS.has(role) && (role === "project_manager" || role === "coordinator");
+      const approvesDefault = role === "project_manager" || role === "coordinator" || role === "works_manager";
       await supabase.from("project_contacts").insert({
         id: crypto.randomUUID(),
         project_id: projectId,
@@ -112,6 +114,7 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
         category: item.category?.trim().slice(0, 120) ?? "",
         work_scope: item.workScope?.trim().slice(0, 500) ?? "",
         notify_email: item.notifyEmail ?? notifyDefault,
+        approves_completion: item.approvesCompletion ?? approvesDefault,
       });
       if (profileId) {
         await supabase.from("project_members").upsert({

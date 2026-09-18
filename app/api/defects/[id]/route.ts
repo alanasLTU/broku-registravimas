@@ -1,9 +1,26 @@
 import { apiError, requirePermission, requireUser } from "@/lib/auth";
-import { COMPLETED_STATUS, isClientRecordType, isRecordType, MEDIA_BUCKET, normalizeStatus, priorities, responsibilities, statuses } from "@/lib/constants";
+import { canApproveCompletion, recordHasRepairPhoto } from "@/lib/completion-approval";
+import {
+  COMPLETED_STATUS,
+  isClientRecordType,
+  isRecordType,
+  MEDIA_BUCKET,
+  normalizeStatus,
+  PENDING_APPROVAL_STATUS,
+  priorities,
+  responsibilities,
+  statuses,
+} from "@/lib/constants";
 import { asUuid } from "@/lib/ids";
 import { fetchRecordBundle } from "@/lib/map-record";
 
 export const dynamic = "force-dynamic";
+
+function clearCompletionRequest(updates: Record<string, unknown>) {
+  updates.completion_requested_by = null;
+  updates.completion_requested_at = null;
+  updates.completion_requested_name = null;
+}
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
@@ -66,12 +83,69 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       updates.archived = payload.archived;
       updates.archived_at = payload.archived ? new Date().toISOString() : null;
     }
-    if (typeof payload.status === "string") {
+
+    if (payload.requestCompletion === true) {
+      if (before.archived) {
+        return Response.json({ error: "Archyvuoto įrašo užbaigti negalima." }, { status: 400 });
+      }
+      if (normalizeStatus(before.status) === PENDING_APPROVAL_STATUS) {
+        return Response.json({ error: "Užbaigimas jau laukia patvirtinimo." }, { status: 400 });
+      }
+      if (normalizeStatus(before.status) === COMPLETED_STATUS) {
+        return Response.json({ error: "Įrašas jau pažymėtas kaip sutvarkytas." }, { status: 400 });
+      }
+      const hasPhoto = await recordHasRepairPhoto(supabase, id);
+      if (!hasPhoto) {
+        return Response.json({ error: "Prieš siunčiant patvirtinimui pridėkite po remonto nuotrauką." }, { status: 400 });
+      }
+      updates.status = PENDING_APPROVAL_STATUS;
+      updates.completion_requested_by = profile.id;
+      updates.completion_requested_at = new Date().toISOString();
+      updates.completion_requested_name = profile.displayName;
+      updates.completion_approved_by = null;
+      updates.completion_approved_at = null;
+      updates.completion_approved_name = null;
+    } else if (payload.approveCompletion === true) {
+      if (normalizeStatus(before.status) !== PENDING_APPROVAL_STATUS) {
+        return Response.json({ error: "Šis įrašas nelaukia patvirtinimo." }, { status: 400 });
+      }
+      const allowed = await canApproveCompletion(supabase, profile, String(before.project_id));
+      if (!allowed) {
+        return Response.json({ error: "Neturite teisės patvirtinti užbaigimo šiame projekte." }, { status: 403 });
+      }
+      const now = new Date().toISOString();
+      updates.status = COMPLETED_STATUS;
+      updates.archived = true;
+      updates.archived_at = now;
+      updates.resolved_at = now;
+      updates.completion_approved_by = profile.id;
+      updates.completion_approved_at = now;
+      updates.completion_approved_name = profile.displayName;
+    } else if (payload.rejectCompletion === true) {
+      if (normalizeStatus(before.status) !== PENDING_APPROVAL_STATUS) {
+        return Response.json({ error: "Šis įrašas nelaukia patvirtinimo." }, { status: 400 });
+      }
+      const allowed = await canApproveCompletion(supabase, profile, String(before.project_id));
+      if (!allowed) {
+        return Response.json({ error: "Neturite teisės atmesti užbaigimo šiame projekte." }, { status: 403 });
+      }
+      updates.status = "Vykdoma";
+      clearCompletionRequest(updates);
+      updates.completion_approved_by = null;
+      updates.completion_approved_at = null;
+      updates.completion_approved_name = null;
+    } else if (typeof payload.status === "string") {
       const nextStatus = normalizeStatus(payload.status);
       if (statuses.includes(nextStatus)) {
+        if (nextStatus === PENDING_APPROVAL_STATUS) {
+          return Response.json({ error: "Naudokite „Baigti“ su nuotrauka, kad siųstumėte patvirtinimui." }, { status: 400 });
+        }
         updates.status = nextStatus;
         const completed = nextStatus === COMPLETED_STATUS;
         if (completed) updates.resolved_at = new Date().toISOString();
+        if (normalizeStatus(before.status) === PENDING_APPROVAL_STATUS && nextStatus !== PENDING_APPROVAL_STATUS) {
+          clearCompletionRequest(updates);
+        }
       }
     }
     if (typeof payload.resolution === "string") updates.resolution = payload.resolution.trim().slice(0, 4000);
@@ -84,6 +158,19 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (typeof payload.selected === "boolean") updates.include_in_report = payload.selected;
     if (typeof payload.visibleToClient === "boolean") updates.visible_to_client = payload.visibleToClient;
     if (typeof payload.notifyResponsible === "boolean") updates.notify_responsible = payload.notifyResponsible;
+    if (payload.planId === null) {
+      updates.plan_id = null;
+      updates.plan_x = null;
+      updates.plan_y = null;
+    } else if (typeof payload.planId === "string" && payload.planId.trim()) {
+      updates.plan_id = payload.planId.trim();
+      const x = Number(payload.planX);
+      const y = Number(payload.planY);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        updates.plan_x = Math.min(0.995, Math.max(0.005, x));
+        updates.plan_y = Math.min(0.995, Math.max(0.005, y));
+      }
+    }
 
     const { error } = await supabase.from("records").update(updates).eq("id", id).select("*").single();
     if (error) throw error;
@@ -102,11 +189,19 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     }
 
     const changes: string[] = [];
-    if (updates.status && updates.status !== before.status) changes.push(`Būsena pakeista į „${updates.status}“`);
-    if (updates.archived === true && !before.archived) changes.push("Įrašas archyvuotas");
-    if (updates.archived === false && before.archived) changes.push("Įrašas grąžintas į sąrašą");
-    if (updates.responsible && updates.responsible !== before.responsible) changes.push(`Atsakomybė: ${updates.responsible}`);
-    if (!changes.length) changes.push("Įrašas atnaujintas");
+    if (payload.requestCompletion === true) {
+      changes.push(`Užbaigimą prašė ${profile.displayName} · laukia PV patvirtinimo`);
+    } else if (payload.approveCompletion === true) {
+      changes.push(`Užbaigimą patvirtino ${profile.displayName} · archyvuota`);
+    } else if (payload.rejectCompletion === true) {
+      changes.push(`Užbaigimą atmetė ${profile.displayName} · grąžinta į vykdymą`);
+    } else {
+      if (updates.status && updates.status !== before.status) changes.push(`Būsena pakeista į „${updates.status}“`);
+      if (updates.archived === true && !before.archived) changes.push("Įrašas archyvuotas");
+      if (updates.archived === false && before.archived) changes.push("Įrašas grąžintas į sąrašą");
+      if (updates.responsible && updates.responsible !== before.responsible) changes.push(`Atsakomybė: ${updates.responsible}`);
+      if (!changes.length) changes.push("Įrašas atnaujintas");
+    }
     try {
       await supabase.from("record_events").insert({
         record_id: id,

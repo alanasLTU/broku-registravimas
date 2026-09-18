@@ -99,7 +99,26 @@ export async function POST(request: Request) {
       created_by: profile.id,
       created_by_email: profile.email,
       created_by_name: profile.displayName,
+      plan_id: typeof payload.planId === "string" && payload.planId.trim() ? payload.planId.trim() : null,
+      plan_x: Number.isFinite(Number(payload.planX)) ? Math.min(0.995, Math.max(0.005, Number(payload.planX))) : null,
+      plan_y: Number.isFinite(Number(payload.planY)) ? Math.min(0.995, Math.max(0.005, Number(payload.planY))) : null,
     };
+    if (!insert.plan_id) {
+      insert.plan_x = null;
+      insert.plan_y = null;
+    } else {
+      const { data: plan, error: planError } = await supabase
+        .from("project_plans")
+        .select("id, project_id")
+        .eq("id", insert.plan_id)
+        .maybeSingle();
+      if (planError) throw planError;
+      if (!plan || plan.project_id !== projectId) {
+        return Response.json({
+          error: "Planas nerastas duomenų bazėje. Įkelkite planą iš naujo arba išsaugokite be žemėlapio.",
+        }, { status: 400 });
+      }
+    }
 
     const { data: record, error } = await supabase.from("records").insert(insert).select("*").single();
     if (error) throw error;

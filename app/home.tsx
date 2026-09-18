@@ -13,7 +13,9 @@ import DateInput from "./components/date-input";
 import InvoiceCapture from "./components/invoice-capture";
 import InvoiceList from "./components/invoice-list";
 import InvoiceReportModal from "./components/invoice-report-modal";
-import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, ARCHIVED_TAB, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, clientRecordTypes, isProjectCompleted, isRecordArchived, normalizeProjectStatus, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectStatus } from "@/lib/constants";
+import PlanViewer, { type PlanPinRecord } from "./components/plan-viewer";
+import { canApproveCompletionClient } from "@/lib/completion-approval";
+import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, ARCHIVED_TAB, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, PENDING_APPROVAL_STATUS, PROJECT_CONTACT_ROLE_LABELS, clientRecordTypes, isProjectCompleted, isRecordArchived, isRecordPendingApproval, normalizeProjectStatus, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectContactRole, type ProjectStatus } from "@/lib/constants";
 import { buildResponsiblePayload, normalizeResponsibleParty, responsibleClassSlug, responsibleDisplay, responsibleOtherText, type ResponsibleParty } from "@/lib/responsible";
 import { DEFAULT_REPORT_OPTIONS, REPORT_OPTION_LABELS, buildReportFieldRows, type ReportOptions } from "@/lib/report-fields";
 import { preparePrintImages } from "@/lib/print-images";
@@ -25,10 +27,18 @@ import { errorMessage } from "@/lib/errors";
 import { imageTooLarge, isImageFile, isVideoFile, mediaFileName, mimeOf, pickInvoiceUploadFile, preparePhotoForUpload, preparePhotoThumb, thumbObjectKeyFor, videoTooLarge } from "@/lib/media";
 import type { RegisterPayload } from "@/lib/register-data";
 import { formatMoneyEuro, matchesInvoiceSearch, type Invoice } from "@/lib/invoices";
+import type { ProjectPlan } from "@/lib/plans";
 
 type Status = typeof statusList[number];
 type Priority = "Kritinis" | "Aukštas" | "Vidutinis" | "Žemas";
 type RecordType = "Brokas" | "Apimtis" | "Papildoma apimtis" | "Užduotis";
+
+type ProjectContactPolicy = {
+  profileId: string | null;
+  role: string;
+  name: string;
+  approvesCompletion: boolean;
+};
 
 type Project = {
   id: string;
@@ -111,6 +121,15 @@ type Defect = {
   parentRecordId?: string | null;
   visibleToClient?: boolean;
   childTasks?: Array<{ id: string; code: string; title: string; status: string }>;
+  planId?: string | null;
+  planX?: number | null;
+  planY?: number | null;
+  completionRequestedBy?: string | null;
+  completionRequestedName?: string;
+  completionRequestedAt?: string | null;
+  completionApprovedBy?: string | null;
+  completionApprovedName?: string;
+  completionApprovedAt?: string | null;
 };
 
 type Profile = {
@@ -360,6 +379,12 @@ export default function Home({ initialData = null }: HomeProps) {
   const [registerTab, setRegisterTab] = useState<"records" | "invoices">("records");
   const [invoices, setInvoices] = useState<Invoice[]>(() => initialData?.invoices ?? []);
   const [invoiceReportOpen, setInvoiceReportOpen] = useState(false);
+  const [planViewerOpen, setPlanViewerOpen] = useState(false);
+  const [planPickForCapture, setPlanPickForCapture] = useState(false);
+  const [captureFinalizeOnMap, setCaptureFinalizeOnMap] = useState(false);
+  const [projectPlans, setProjectPlans] = useState<ProjectPlan[]>([]);
+  const captureFormRef = useRef<HTMLFormElement>(null);
+  const [pendingPlanPin, setPendingPlanPin] = useState<{ planId: string; x: number; y: number } | null>(null);
   const [captureSaving, setCaptureSaving] = useState(false);
   const [showCaptureNote, setShowCaptureNote] = useState(false);
   const [showCaptureMore, setShowCaptureMore] = useState(false);
@@ -382,6 +407,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const [editProjectStatus, setEditProjectStatus] = useState<ProjectStatus>("Vykdomas");
   const [editProjectSaving, setEditProjectSaving] = useState(false);
   const [projectContactsRevision, setProjectContactsRevision] = useState(0);
+  const [projectContactPolicies, setProjectContactPolicies] = useState<ProjectContactPolicy[]>([]);
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [showCompletedProjects, setShowCompletedProjects] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -419,6 +445,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const [completePhoto, setCompletePhoto] = useState<File | null>(null);
   const [completePhotoPreview, setCompletePhotoPreview] = useState<string | null>(null);
   const [completeSaving, setCompleteSaving] = useState(false);
+  const [completionActionSaving, setCompletionActionSaving] = useState(false);
   const [linkedTaskOpen, setLinkedTaskOpen] = useState(false);
   const [linkedTaskTitle, setLinkedTaskTitle] = useState("");
   const [linkedTaskSaving, setLinkedTaskSaving] = useState(false);
@@ -478,16 +505,28 @@ export default function Home({ initialData = null }: HomeProps) {
             joinedProjectId = joinPayload.projectId;
           }
         } else if (invite) {
-          const inviteResponse = await fetch("/api/invites/accept", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ token: invite }),
-          });
-          const invitePayload = await inviteResponse.json() as { projectId?: string; error?: string };
-          if (!inviteResponse.ok || !invitePayload.projectId) {
-            if (active) setToast(invitePayload.error || "Nepavyko priimti kvietimo");
-          } else {
-            joinedProjectId = invitePayload.projectId;
+          const validateResponse = await fetch(`/api/invites/validate?token=${encodeURIComponent(invite)}`);
+          const validatePayload = await validateResponse.json() as { status?: string; email?: string };
+          if (validatePayload.status === "used") {
+            if (active) {
+              setToast("Kvietimas jau panaudotas — esate prisijungę.");
+              window.history.replaceState({}, "", "/");
+            }
+          } else if (validatePayload.status === "open") {
+            const inviteResponse = await fetch("/api/invites/accept", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ token: invite }),
+            });
+            const invitePayload = await inviteResponse.json() as { projectId?: string; error?: string };
+            if (!inviteResponse.ok || !invitePayload.projectId) {
+              if (active) setToast(invitePayload.error || "Nepavyko priimti kvietimo");
+            } else {
+              joinedProjectId = invitePayload.projectId;
+            }
+          } else if (active) {
+            setToast("Kvietimo nuoroda nebegalioja");
+            window.history.replaceState({}, "", "/");
           }
         }
 
@@ -630,7 +669,7 @@ export default function Home({ initialData = null }: HomeProps) {
   }, []);
 
   useEffect(() => {
-    const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen || Boolean(editProjectId) || profileSettingsOpen;
+    const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen || Boolean(editProjectId) || profileSettingsOpen || planViewerOpen;
     if (!modalOpen) return;
     const { body } = document;
     const previousOverflow = body.style.overflow;
@@ -641,7 +680,7 @@ export default function Home({ initialData = null }: HomeProps) {
       body.style.overflow = previousOverflow;
       body.style.overflowX = previousOverflowX;
     };
-  }, [captureOpen, completeOpen, detailId, editProjectId, filtersOpen, inviteOpen, mediaViewerIndex, newProjectOpen, photoEditorTarget, profileSettingsOpen, projectPickerOpen, reportMode]);
+  }, [captureOpen, completeOpen, detailId, editProjectId, filtersOpen, inviteOpen, mediaViewerIndex, newProjectOpen, photoEditorTarget, planViewerOpen, profileSettingsOpen, projectPickerOpen, reportMode]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -735,6 +774,63 @@ export default function Home({ initialData = null }: HomeProps) {
   const activeProject = projects.find((project) => project.id === resolvedProjectId) ?? { id: "", name: isClient ? "Objektas nepriskirtas" : "Nėra projekto", address: "", open: 0, overdue: 0, status: "Vykdomas" as ProjectStatus, archived: false, clientsSeeStaffRecords: false, invoiceTotalCents: 0 };
   const projectCompleted = isProjectCompleted(activeProject);
 
+  useEffect(() => {
+    if (!resolvedProjectId) {
+      setProjectPlans([]);
+      return;
+    }
+    let cancelled = false;
+    void fetch(`/api/plans?projectId=${encodeURIComponent(resolvedProjectId)}`)
+      .then((response) => response.json() as Promise<{ plans?: ProjectPlan[] }>)
+      .then((payload) => {
+        if (!cancelled) setProjectPlans(payload.plans ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setProjectPlans([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedProjectId]);
+
+  useEffect(() => {
+    if (!resolvedProjectId) {
+      setProjectContactPolicies([]);
+      return;
+    }
+    let cancelled = false;
+    void fetch(`/api/projects/${resolvedProjectId}/contacts`)
+      .then((response) => response.json())
+      .then((payload: {
+        contacts?: Array<{
+          role: string;
+          approves_completion?: boolean;
+          profile_id: string | null;
+          contacts: { name: string } | null;
+          profiles: { display_name: string } | null;
+        }>;
+      }) => {
+        if (cancelled) return;
+        const next = (payload.contacts ?? []).map((item) => {
+          const name = item.profiles?.display_name?.trim() || item.contacts?.name?.trim() || "";
+          const legacyApprove = item.role === "project_manager" || item.role === "coordinator" || item.role === "works_manager";
+          return {
+            profileId: item.profile_id,
+            role: item.role,
+            name,
+            approvesCompletion: item.approves_completion ?? legacyApprove,
+          };
+        }).filter((item) => item.name);
+        setProjectContactPolicies(next);
+      })
+      .catch(() => {
+        if (!cancelled) setProjectContactPolicies([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resolvedProjectId, projectContactsRevision]);
+
   function openProjectPicker() {
     if (isClient) return;
     setProjectSearch("");
@@ -811,6 +907,21 @@ export default function Home({ initialData = null }: HomeProps) {
   }, [detail, detailMetaDraft]);
   const detailPhotos = defectPhotosFor(detail);
   const detailVideos = defectVideosFor(detail);
+  const detailPending = Boolean(detail && isRecordPendingApproval(detail));
+  const detailRepairPhoto = detailPhotos.find((photo) => photo.caption.toLowerCase().includes("po remonto")) ?? detailPhotos.at(-1) ?? null;
+  const completionApprovers = useMemo(
+    () => projectContactPolicies.filter((item) => item.approvesCompletion),
+    [projectContactPolicies],
+  );
+  const completionApproverLabel = useMemo(
+    () => completionApprovers.map((item) => PROJECT_CONTACT_ROLE_LABELS[item.role as ProjectContactRole] ?? item.role).join(", "),
+    [completionApprovers],
+  );
+  const canApproveCompletionRequest = Boolean(
+    detailPending
+    && profile
+    && canApproveCompletionClient(profile, projectContactPolicies),
+  );
   const detailMedia = defectMediaFor(detail);
   const detailItems = defectItemsFor(detail);
   const captureMedia: MediaViewerItem[] = [
@@ -851,6 +962,82 @@ export default function Home({ initialData = null }: HomeProps) {
     setShowCaptureNote(false);
     setShowCaptureMore(false);
     setCaptureOpen(true);
+  }
+
+  function openPlanViewer() {
+    if (!resolvedProjectId) {
+      showToast("Pasirinkite objektą.");
+      return;
+    }
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
+    setPlanViewerOpen(true);
+  }
+
+  function openCapturePickOnMapFromForm() {
+    if (projectCompleted) {
+      showToast("Projektas baigtas. Pakeiskite būseną į „Vykdomas“, jei vėl fiksuojate.");
+      return;
+    }
+    if (!resolvedProjectId) {
+      showToast(isClient ? "Nuoroda nepriskyrė objekto." : "Pirmiausia pasirinkite projektą.");
+      return;
+    }
+    if (!projectPlans.length) {
+      showToast("Šiam objektui dar nėra plano.");
+      return;
+    }
+    if (!validateCaptureForm()) return;
+    setPlanPickForCapture(true);
+    setCaptureFinalizeOnMap(true);
+    setPlanViewerOpen(true);
+  }
+
+  function closePlanViewer() {
+    setPlanViewerOpen(false);
+    if (captureFinalizeOnMap) {
+      setPlanPickForCapture(false);
+      setCaptureFinalizeOnMap(false);
+    }
+  }
+
+  function cancelFinalizeCapture() {
+    setPlanViewerOpen(false);
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
+  }
+
+  function openCaptureFromPlan(planId: string, x: number, y: number) {
+    setPendingPlanPin({ planId, x, y });
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
+    setPlanViewerOpen(false);
+    openCapture();
+  }
+
+  async function finalizeCaptureOnMap(planId: string, x: number, y: number) {
+    const saved = await submitCaptureDefect({ planId, x, y });
+    if (!saved) return;
+    setPlanViewerOpen(false);
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
+  }
+
+  async function attachRecordToPlan(recordId: string, planId: string, x: number, y: number) {
+    const response = await fetch(`/api/defects/${recordId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ planId, planX: x, planY: y }),
+    });
+    const payload = await response.json() as { defect?: Defect; error?: string };
+    if (!response.ok || !payload.defect) throw new Error(payload.error || "Nepavyko prisegti");
+    setDefects((items) => items.map((item) => item.id === recordId ? {
+      ...item,
+      planId: payload.defect!.planId ?? planId,
+      planX: payload.defect!.planX ?? x,
+      planY: payload.defect!.planY ?? y,
+    } : item));
+    showToast("Smeigtukas pridėtas");
   }
 
   function openInvoiceCapture() {
@@ -896,6 +1083,9 @@ export default function Home({ initialData = null }: HomeProps) {
     setCaptureResponsibleOther("");
     setCaptureDueDate("");
     setPendingInvoiceFile(null);
+    setPendingPlanPin(null);
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
   }
 
   function chooseCaptureType(type: RecordType | "Sąskaita") {
@@ -909,52 +1099,76 @@ export default function Home({ initialData = null }: HomeProps) {
     setCaptureStep("form");
   }
 
-  async function addDefect(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget;
+  function readCaptureForm() {
+    const form = captureFormRef.current;
+    if (!form) return null;
     const data = new FormData(form);
-    const validIssues = issueDrafts
-      .map((item) => ({ ...item, issue: item.issue.trim(), requiredWork: item.requiredWork.trim() }))
-      .filter((item) => item.issue);
-    const title = String(data.get("title") ?? "").trim();
-    const room = String(data.get("room") ?? "").trim();
-    const zone = String(data.get("zone") ?? "").trim();
+    return {
+      title: String(data.get("title") ?? "").trim(),
+      room: String(data.get("room") ?? "").trim(),
+      zone: String(data.get("zone") ?? "").trim(),
+      priority: String(data.get("priority") ?? "Vidutinis"),
+      due: String(data.get("due") ?? "").trim(),
+      requestedBy: String(data.get("requestedBy") ?? "").trim(),
+      price: String(data.get("price") ?? "").trim(),
+      notes: String(data.get("notes") ?? "").trim(),
+    };
+  }
+
+  function validateCaptureForm() {
+    const fields = readCaptureForm();
+    if (!fields) {
+      showToast("Nepavyko nuskaityti formos");
+      return false;
+    }
     if (!resolvedProjectId) {
       showToast(isClient ? "Nuoroda nepriskyrė objekto. Paprašykite Distyle naujos nuorodos." : "Pirmiausia pasirinkite projektą");
-      return;
+      return false;
     }
-    if (!title || !room) {
+    if (!fields.title || !fields.room) {
       showToast("Nurodykite pavadinimą ir patalpą");
-      return;
+      return false;
     }
     if (captureRecordType === "Brokas" && !photoDrafts.length && !videoDrafts.length) {
       showToast("Brokui reikia bent vienos nuotraukos arba video");
-      return;
+      return false;
     }
     if (captureResponsible === RESPONSIBLE_OTHER && !captureResponsibleOther.trim()) {
       showToast("Pasirinkus „Kita“, įrašykite kas atsakingas");
-      return;
+      return false;
     }
     if (isClient && captureRecordType === "Užduotis") {
       showToast("Klientai negali kurti užduočių");
-      return;
+      return false;
     }
+    return true;
+  }
+
+  async function submitCaptureDefect(planPin?: { planId: string; x: number; y: number }) {
+    const fields = readCaptureForm();
+    if (!fields || !validateCaptureForm()) return false;
+    const validIssues = issueDrafts
+      .map((item) => ({ ...item, issue: item.issue.trim(), requiredWork: item.requiredWork.trim() }))
+      .filter((item) => item.issue);
     window.localStorage.setItem(ACTIVE_TYPE_STORAGE_KEY, captureRecordType);
     const responsiblePayload = buildResponsiblePayload(captureResponsible, captureResponsibleOther);
     const body = {
       projectId: resolvedProjectId,
       recordType: captureRecordType,
-      title,
-      room,
-      zone,
+      title: fields.title,
+      room: fields.room,
+      zone: fields.zone,
       issues: validIssues,
-      priority: String(data.get("priority") ?? "Vidutinis"),
+      priority: fields.priority,
       responsible: responsiblePayload.responsible,
       assignee: responsiblePayload.assignee,
-      due: String(data.get("due") ?? "").trim(),
-      requestedBy: String(data.get("requestedBy") ?? "").trim(),
-      price: String(data.get("price") ?? "").trim(),
-      notes: String(data.get("notes") ?? "").trim(),
+      due: fields.due,
+      requestedBy: fields.requestedBy,
+      price: fields.price,
+      notes: fields.notes,
+      planId: planPin?.planId ?? pendingPlanPin?.planId,
+      planX: planPin?.x ?? pendingPlanPin?.x,
+      planY: planPin?.y ?? pendingPlanPin?.y,
     };
     const drafts = { photos: [...photoDrafts], videos: [...videoDrafts] };
     setCaptureSaving(true);
@@ -976,6 +1190,7 @@ export default function Home({ initialData = null }: HomeProps) {
       setPhotoDrafts([]);
       setVideoDrafts([]);
       setIssueDrafts([blankIssue()]);
+      if (pendingPlanPin && !planPin) setPlanViewerOpen(true);
       showToast(`${saved.code} išsaugotas`);
       if (drafts.photos.length || drafts.videos.length) {
         try {
@@ -993,11 +1208,18 @@ export default function Home({ initialData = null }: HomeProps) {
       }
       drafts.photos.forEach((photo) => URL.revokeObjectURL(photo.url));
       drafts.videos.forEach((video) => URL.revokeObjectURL(video.url));
+      return true;
     } catch (error) {
       showToast(errorMessage(error, "Nepavyko išsaugoti įrašo"));
+      return false;
     } finally {
       setCaptureSaving(false);
     }
+  }
+
+  async function addDefect(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitCaptureDefect();
   }
 
   async function uploadMediaToRecord(recordId: string, nextProjectId: string, photos: PhotoDraft[], videos: VideoDraft[]) {
@@ -1244,7 +1466,7 @@ export default function Home({ initialData = null }: HomeProps) {
     void persistPatch(id, { selected });
   }
 
-  async function persistPatch(id: string, patch: Partial<Defect>) {
+  async function persistPatch(id: string, patch: Partial<Defect> & { requestCompletion?: boolean; approveCompletion?: boolean; rejectCompletion?: boolean }) {
     try {
       const response = await fetch(`/api/defects/${id}`, {
         method: "PATCH",
@@ -1490,49 +1712,68 @@ export default function Home({ initialData = null }: HomeProps) {
 
   async function confirmComplete() {
     if (!detailId) return;
+    if (!completePhoto) {
+      showToast("Pridėkite po remonto nuotrauką");
+      return;
+    }
     const id = detailId;
     const photo = completePhoto;
     setCompleteOpen(false);
     setCompletePhoto(null);
     if (completePhotoPreview) URL.revokeObjectURL(completePhotoPreview);
     setCompletePhotoPreview(null);
-    setMediaViewerIndex(null);
-    setCaptureViewerIndex(null);
-    setDetailId(null);
     setCompleteSaving(true);
-    setDefects((items) => items.map((item) => item.id === id ? { ...item, status: COMPLETED_STATUS } : item));
-    setActiveStatus(COMPLETED_STATUS);
     try {
-      const saved = await persistPatch(id, { status: COMPLETED_STATUS });
-      if (!saved) {
-        setDetailId(id);
-        return;
+      const draft: PhotoDraft = { id: randomId(), file: photo, url: URL.createObjectURL(photo), caption: "Po remonto" };
+      try {
+        const uploaded = await uploadMediaToRecord(id, resolvedProjectId, [draft], []);
+        setDefects((items) => items.map((item) => item.id === id ? {
+          ...item,
+          photos: [...defectPhotosFor(item), ...uploaded.filter((media) => media.kind !== "video") as DefectPhoto[]],
+          photo: item.photo ?? uploaded.find((media) => media.kind !== "video")?.url,
+        } : item));
+      } finally {
+        URL.revokeObjectURL(draft.url);
       }
-      if (photo) {
-        try {
-          const draft: PhotoDraft = { id: randomId(), file: photo, url: URL.createObjectURL(photo), caption: "Po remonto" };
-          try {
-            const uploaded = await uploadMediaToRecord(id, resolvedProjectId, [draft], []);
-            setDefects((items) => items.map((item) => item.id === id ? {
-              ...item,
-              photos: [...defectPhotosFor(item), ...uploaded.filter((media) => media.kind !== "video") as DefectPhoto[]],
-              photo: item.photo ?? uploaded.find((media) => media.kind !== "video")?.url,
-            } : item));
-          } finally {
-            URL.revokeObjectURL(draft.url);
-          }
-          showToast("✓ Baigtas · po remonto nuotrauka įkelta");
-        } catch (error) {
-          showToast(`✓ Baigtas. Po remonto nuotraukos įkelti nepavyko: ${errorMessage(error, "bandykite vėliau")}`);
-        }
-      } else {
-        showToast("✓ Įrašas pažymėtas kaip Baigtas");
-      }
+      const saved = await persistPatch(id, { requestCompletion: true } as Partial<Defect>);
+      if (!saved) return;
+      setActiveStatus(PENDING_APPROVAL_STATUS);
+      showToast("Užbaigimas perduotas patvirtinimui");
     } catch (error) {
-      setDetailId(id);
-      showToast(errorMessage(error, "Užbaigti nepavyko"));
+      showToast(errorMessage(error, "Siųsti patvirtinimui nepavyko"));
     } finally {
       setCompleteSaving(false);
+    }
+  }
+
+  async function approveCompletion() {
+    if (!detailId || !detail) return;
+    if (!window.confirm("Patvirtinti, kad brokas tikrai sutvarkytas, ir perkelti į archyvą?")) return;
+    const id = detailId;
+    setCompletionActionSaving(true);
+    try {
+      const saved = await persistPatch(id, { approveCompletion: true } as Partial<Defect>);
+      if (!saved) return;
+      setDetailId(null);
+      setActiveStatus(ARCHIVED_TAB);
+      showToast("✓ Užbaigimas patvirtintas · įrašas archyvuotas");
+    } finally {
+      setCompletionActionSaving(false);
+    }
+  }
+
+  async function rejectCompletion() {
+    if (!detailId) return;
+    if (!window.confirm("Grąžinti broką į vykdymą? Darbuotojas galės siųsti patvirtinimui dar kartą.")) return;
+    const id = detailId;
+    setCompletionActionSaving(true);
+    try {
+      const saved = await persistPatch(id, { rejectCompletion: true } as Partial<Defect>);
+      if (!saved) return;
+      setActiveStatus("Vykdoma");
+      showToast("Užbaigimas atmestas · brokas grąžintas į vykdymą");
+    } finally {
+      setCompletionActionSaving(false);
     }
   }
 
@@ -1679,7 +1920,7 @@ export default function Home({ initialData = null }: HomeProps) {
     setProjectPickerOpen(false);
   }
 
-  async function saveEditedProject(payload: { name: string; address: string; status: ProjectStatus; contacts: Array<{ role: string; name: string; phone: string; email: string; category: string; workScope: string; contactId?: string; profileId?: string; notifyEmail?: boolean }> }) {
+  async function saveEditedProject(payload: { name: string; address: string; status: ProjectStatus; contacts: Array<{ role: string; name: string; phone: string; email: string; category: string; workScope: string; contactId?: string; profileId?: string; notifyEmail?: boolean; approvesCompletion?: boolean }> }) {
     if (!editProjectId) return;
     setEditProjectSaving(true);
     try {
@@ -1709,6 +1950,7 @@ export default function Home({ initialData = null }: HomeProps) {
             category: item.category,
             workScope: item.workScope,
             notifyEmail: item.notifyEmail,
+            approvesCompletion: item.approvesCompletion,
           })),
         }),
       });
@@ -1721,7 +1963,7 @@ export default function Home({ initialData = null }: HomeProps) {
       } : item));
       setEditProjectId(null);
       setProjectContactsRevision((value) => value + 1);
-      showToast(body.project.status === "Baigtas" ? "Projektas pažymėtas kaip baigtas" : "Projektas atnaujintas");
+      showToast("Objektas atnaujintas");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Projekto atnaujinti nepavyko");
     } finally {
@@ -1729,9 +1971,54 @@ export default function Home({ initialData = null }: HomeProps) {
     }
   }
 
+  async function setProjectArchived(projectIdToUpdate: string, archived: boolean) {
+    const target = projects.find((project) => project.id === projectIdToUpdate);
+    const actionLabel = archived ? "Archyvuoti" : "Grąžinti į aktyvius";
+    const message = archived
+      ? `Archyvuoti objektą „${target?.name ?? ""}"?\n\nVisi įrašai, nuotraukos ir sąskaitos liks duomenų bazėje, bet objektas pasislėps iš aktyvaus sąrašo.`
+      : `Grąžinti objektą „${target?.name ?? ""}" į aktyvius?`;
+    if (!window.confirm(message)) return;
+    setEditProjectSaving(true);
+    try {
+      const response = await fetch("/api/projects", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: projectIdToUpdate, archived }),
+      });
+      const body = await response.json() as { project?: Project; error?: string };
+      if (!response.ok || !body.project) throw new Error(body.error || `${actionLabel} nepavyko`);
+      setProjects((items) => items.map((item) => item.id === projectIdToUpdate ? {
+        ...item,
+        name: body.project!.name,
+        address: body.project!.address,
+        status: body.project!.status,
+        archived: body.project!.archived,
+      } : item));
+      if (archived && projectIdToUpdate === resolvedProjectId) {
+        const next = projects.find((project) => project.id !== projectIdToUpdate && !isProjectCompleted(project));
+        if (next) selectProject(next.id, false);
+      }
+      if (editProjectId === projectIdToUpdate && archived) setEditProjectId(null);
+      showToast(archived ? "Objektas archyvuotas" : "Objektas grąžintas į aktyvius");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : `${actionLabel} nepavyko`);
+    } finally {
+      setEditProjectSaving(false);
+    }
+  }
+
+  async function archiveProjectById(projectIdToArchive: string) {
+    await setProjectArchived(projectIdToArchive, true);
+  }
+
+  async function restoreProjectById(projectIdToRestore: string) {
+    await setProjectArchived(projectIdToRestore, false);
+  }
+
   async function deleteProjectById(projectIdToDelete: string) {
     const target = projects.find((project) => project.id === projectIdToDelete);
-    if (!window.confirm(`Ištrinti projektą „${target?.name ?? ""}“ ir visus jo įrašus? Šio veiksmo atšaukti negalima.`)) return;
+    if (!window.confirm(`VISAM LAIKUI ištrinti objektą „${target?.name ?? ""}"?\n\nBus pašalinti visi įrašai, nuotraukos, planai, sąskaitos ir narystės. Šio veiksmo atšaukti negalima.`)) return;
+    if (!window.confirm(`Patvirtinkite dar kartą: tikrai trinti „${target?.name ?? ""}"?`)) return;
     setEditProjectSaving(true);
     try {
       const response = await fetch(`/api/projects?id=${encodeURIComponent(projectIdToDelete)}`, { method: "DELETE" });
@@ -1747,7 +2034,7 @@ export default function Home({ initialData = null }: HomeProps) {
         setProjectId("");
         window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
       }
-      showToast("Projektas ištrintas");
+      showToast("Objektas visam laikui ištrintas");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "Projekto ištrinti nepavyko");
     } finally {
@@ -1949,7 +2236,7 @@ export default function Home({ initialData = null }: HomeProps) {
           ) : sidebarProjects.map((project) => (
             <button key={project.id} className={project.id === resolvedProjectId ? "project-active" : ""} onClick={() => selectProject(project.id)}>
               <span className="project-dot" />
-              <span><strong>{project.name}</strong><small>{isProjectCompleted(project) ? "Baigtas" : project.address || "Informaciją papildysite vėliau"}</small></span>
+              <span><strong>{project.name}</strong><small>{isProjectCompleted(project) ? "Archyvuotas" : project.address || "Informaciją papildysite vėliau"}</small></span>
               <em>{defects.filter((item) => item.projectId === project.id && !isRecordArchived(item)).length}</em>
             </button>
           ))}
@@ -2012,9 +2299,12 @@ export default function Home({ initialData = null }: HomeProps) {
                 {isStaff && activeProject.id ? (
                   <button type="button" onClick={() => openEditProject(activeProject)} aria-label="Redaguoti projektą">✎</button>
                 ) : null}
+                {resolvedProjectId ? (
+                  <button type="button" className="plan-heading-button" onClick={openPlanViewer}>Planas</button>
+                ) : null}
               </div>
               <p>
-                {projectCompleted ? "Baigtas projektas · " : ""}
+                {projectCompleted ? "Archyvuotas objektas · " : ""}
                 {activeProject.address || (isClient ? "Čia fiksuojate brokus, apimtis ir papildomas apimtis." : "Projekto informaciją galėsite papildyti vėliau")}
               </p>
               <button
@@ -2054,6 +2344,7 @@ export default function Home({ initialData = null }: HomeProps) {
             {isStaff && (
             <div className="heading-actions">
               <button className="secondary-button heading-invite-button" onClick={() => void openInviteModal()}>Klientų nuoroda</button>
+              <button className="secondary-button" onClick={openPlanViewer}>Planas</button>
               <button className="secondary-button" onClick={() => setInvoiceReportOpen(true)}>SF ataskaita</button>
               <button className="secondary-button" onClick={() => setReportMode(true)}>Ataskaita / PDF</button>
             </div>
@@ -2320,6 +2611,44 @@ export default function Home({ initialData = null }: HomeProps) {
         )}
       </nav>
 
+      {planViewerOpen && resolvedProjectId ? (
+        <PlanViewer
+          projectId={resolvedProjectId}
+          projectName={activeProject.name}
+          plans={projectPlans}
+          records={projectDefects.map((item): PlanPinRecord => ({
+            id: item.id,
+            code: item.code,
+            title: item.title,
+            recordType: item.recordType,
+            status: item.status,
+            room: item.room,
+            photoUrl: item.photo ?? item.photos?.[0]?.url,
+            photoThumbUrl: item.photos?.[0]?.thumbUrl,
+            planId: item.planId ?? null,
+            planX: item.planX ?? null,
+            planY: item.planY ?? null,
+          }))}
+          canUpload={isStaff && !projectCompleted}
+          canCreate={!projectCompleted}
+          canAttach={isStaff && !projectCompleted}
+          onClose={closePlanViewer}
+          onPlansChange={setProjectPlans}
+          onCreateRecord={openCaptureFromPlan}
+          pickForNewRecord={planPickForCapture}
+          finalizeCapture={captureFinalizeOnMap}
+          finalizeSaving={captureSaving}
+          finalizeSaveLabel={recordCopy[captureRecordType].save}
+          onFinalizeCapture={finalizeCaptureOnMap}
+          onCancelFinalizeCapture={cancelFinalizeCapture}
+          onAttachRecord={attachRecordToPlan}
+          onOpenRecord={(id) => {
+            setDetailId(id);
+          }}
+          showToast={showToast}
+        />
+      ) : null}
+
       {captureOpen && (
         <div className="modal-layer" role="dialog" aria-modal="true" aria-labelledby="capture-title">
           <button className="modal-scrim" onClick={closeCapture} aria-label="Uždaryti" />
@@ -2327,7 +2656,7 @@ export default function Home({ initialData = null }: HomeProps) {
             <section className="capture-panel capture-type-step">
               <div className="panel-handle" />
               <div className="panel-title"><div><span>Naujas įrašas</span><h2 id="capture-title">Kas tai?</h2></div><button type="button" onClick={closeCapture} aria-label="Uždaryti">×</button></div>
-              <p className="capture-type-lead">Pasirinkite, ką fiksuojate objekte.</p>
+              <p className="capture-type-lead">{pendingPlanPin ? "Smeigtukas ant plano — pasirinkite tipą. Vieta išsisaugos kartu su įrašu." : "Pasirinkite, ką fiksuojate objekte."}</p>
               <div className="capture-type-grid">
                 {captureTypes.map((type) => (
                   <button type="button" key={type} className={captureRecordType === type ? "type-selected" : ""} onClick={() => chooseCaptureType(type)}>
@@ -2368,7 +2697,7 @@ export default function Home({ initialData = null }: HomeProps) {
               }}
             />
           ) : (
-          <form className="capture-panel" onSubmit={addDefect}>
+          <form ref={captureFormRef} className="capture-panel" onSubmit={addDefect}>
             <div className="panel-handle" />
             <div className="panel-title"><div><span>Naujas įrašas</span><h2 id="capture-title">{recordCopy[captureRecordType].title}</h2></div><button type="button" onClick={closeCapture} aria-label="Uždaryti">×</button></div>
             <button type="button" className="capture-back" onClick={() => setCaptureStep("type")}>← {captureRecordType} · keisti tipą</button>
@@ -2444,6 +2773,11 @@ export default function Home({ initialData = null }: HomeProps) {
             </section>
 
             <section className="issue-builder">
+              {projectPlans.length > 0 ? (
+                <button type="button" className="add-issue-button add-issue-button-emphasis" onClick={openCapturePickOnMapFromForm}>
+                  ⌖ Pažymėti ant plano
+                </button>
+              ) : null}
               {showCaptureNote || issueDrafts.some((item) => item.issue || item.requiredWork) ? (
                 <>
                   <div className="capture-section-title"><div><strong>{recordCopy[captureRecordType].section}</strong><span>{recordCopy[captureRecordType].sectionHelp}</span></div></div>
@@ -2512,7 +2846,7 @@ export default function Home({ initialData = null }: HomeProps) {
               <button type="button" onClick={() => setProjectPickerOpen(false)} aria-label="Uždaryti">×</button>
             </div>
             <p>Pasirinktas projektas bus naudojamas visiems naujiems įrašams šiame telefone ar kompiuteryje, kol jį pakeisite.</p>
-            <label className="invite-toggle"><input type="checkbox" checked={showCompletedProjects} onChange={(event) => setShowCompletedProjects(event.target.checked)} /><span>Rodyti baigtus projektus</span></label>
+            <label className="invite-toggle"><input type="checkbox" checked={showCompletedProjects} onChange={(event) => setShowCompletedProjects(event.target.checked)} /><span>Rodyti archyvuotus objektus</span></label>
             <label className="project-picker-search">
               <span>⌕</span>
               <input value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder="Ieškoti projekto…" autoFocus />
@@ -2522,18 +2856,23 @@ export default function Home({ initialData = null }: HomeProps) {
                 <div key={project.id} className={`project-choice-row ${isStaff ? "project-choice-row-staff" : ""} ${project.id === resolvedProjectId ? "project-choice-active" : ""}`}>
                   <button type="button" onClick={() => selectProject(project.id)}>
                     <span className="project-choice-dot" />
-                    <span><strong>{project.name}</strong><small>{isProjectCompleted(project) ? "Baigtas" : project.address || "Informaciją papildysite vėliau"}</small></span>
+                    <span><strong>{project.name}</strong><small>{isProjectCompleted(project) ? "Archyvuotas" : project.address || "Informaciją papildysite vėliau"}</small></span>
                     <em>{project.id === resolvedProjectId ? "Pasirinktas" : "Pasirinkti"}</em>
                   </button>
                   {isStaff ? (
                     <>
                       <button type="button" className="project-choice-edit" onClick={() => openEditProject(project)} aria-label={`Redaguoti ${project.name}`}>✎</button>
-                      <button type="button" className="project-choice-delete" onClick={() => void deleteProjectById(project.id)} aria-label={`Ištrinti ${project.name}`} disabled={editProjectSaving}>🗑</button>
+                      {!isProjectCompleted(project) ? (
+                        <button type="button" className="project-choice-archive" onClick={() => void archiveProjectById(project.id)} aria-label={`Archyvuoti ${project.name}`} disabled={editProjectSaving} title="Archyvuoti">📦</button>
+                      ) : (
+                        <button type="button" className="project-choice-archive" onClick={() => void restoreProjectById(project.id)} aria-label={`Grąžinti ${project.name}`} disabled={editProjectSaving} title="Grąžinti">↩</button>
+                      )}
+                      <button type="button" className="project-choice-delete" onClick={() => void deleteProjectById(project.id)} aria-label={`Ištrinti ${project.name}`} disabled={editProjectSaving} title="Ištrinti visam laikui">🗑</button>
                     </>
                   ) : null}
                 </div>
               ))}
-              {!filteredProjects.length && <div className="project-choice-empty">{showCompletedProjects ? "Pagal paiešką projektų nerasta." : "Nėra vykdomų projektų. Įjunkite „Rodyti baigtus“ arba sukurkite naują."}</div>}
+              {!filteredProjects.length && <div className="project-choice-empty">{showCompletedProjects ? "Pagal paiešką objektų nerasta." : "Nėra aktyvių objektų. Įjunkite „Rodyti archyvuotus“ arba sukurkite naują."}</div>}
             </div>
             {isStaff && <button type="button" className="project-create-button" onClick={() => { setProjectPickerOpen(false); setNewProjectOpen(true); }}>＋ Sukurti naują projektą</button>}
           </section>
@@ -2565,6 +2904,8 @@ export default function Home({ initialData = null }: HomeProps) {
           onClose={() => setEditProjectId(null)}
           onOpenProfile={() => setProfileSettingsOpen(true)}
           onSave={saveEditedProject}
+          onArchive={() => void archiveProjectById(editProjectId)}
+          onRestore={() => void restoreProjectById(editProjectId)}
           onDelete={() => void deleteEditedProject()}
         />
       )}
@@ -2618,9 +2959,10 @@ export default function Home({ initialData = null }: HomeProps) {
                 </>
               ) : null}
             </div>
+            <p>Asmeninis kvietimas — <b>vienkartinė nuoroda</b> nurodytam el. paštui. Po registracijos ta pati nuoroda ves tik į prisijungimą.</p>
             <div className="invite-personal-block">
-              <strong>Asmeninis kvietimas (nebūtina)</strong>
-              <span>Konkrečiam el. paštui — nuoroda veiks tik tam paštui.</span>
+              <strong>Asmeninis kvietimas</strong>
+              <span>Konkrečiam el. paštui — viena paskyra, vienas objektas.</span>
               <label><span>Kliento el. paštas</span><input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="klientas@imone.lt" /></label>
               {inviteLink ? <p className="invite-link">Asmeninė nuoroda:<br />{inviteLink}</p> : null}
             </div>
@@ -2630,7 +2972,7 @@ export default function Home({ initialData = null }: HomeProps) {
       )}
 
       {detail && (
-        <div className={`detail-drawer ${detailId ? "drawer-open" : ""}`}>
+        <div className={`detail-drawer ${detailId ? "drawer-open" : ""}${planViewerOpen ? " detail-drawer-over-plan" : ""}`}>
           <div className="drawer-header"><div><span>{detail.code} <em className={recordTypeClass(detail.recordType)}>{detail.recordType}</em>{isStaff && originBadge(detail)}</span><small>{placeLabel(detail)}{isStaff && isClientOrigin(detail) && detail.createdByEmail ? ` · įkėlė ${detail.createdByEmail}` : isStaff ? " · Distyle" : ""}</small></div><button onClick={() => setDetailId(null)} aria-label="Uždaryti">×</button></div>
           <div
             className={`drawer-gallery ${detailPhotoDragActive ? "drawer-gallery-drag-active" : ""}`}
@@ -2673,6 +3015,44 @@ export default function Home({ initialData = null }: HomeProps) {
             <div className="drawer-drop-note">Kompiuteryje nuotraukas ir video galite nutempti į šią sritį</div>
           </div>
           <div className="drawer-body">
+            {detailPending && (
+              <section className="completion-pending-banner" aria-live="polite">
+                <div className="completion-pending-head">
+                  <span className={statusClass(PENDING_APPROVAL_STATUS)}><i />{PENDING_APPROVAL_STATUS}</span>
+                  <strong>Laukia patvirtinimo</strong>
+                </div>
+                <p>
+                  Užbaigimą prašė <b>{detail.completionRequestedName || "Nežinomas vartotojas"}</b>
+                  {detail.completionRequestedAt ? ` · ${new Intl.DateTimeFormat("lt-LT", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(detail.completionRequestedAt))}` : ""}
+                </p>
+                {detailRepairPhoto ? (
+                  <button type="button" className="completion-repair-photo" onClick={() => {
+                    const index = detailMedia.findIndex((item) => item.id === detailRepairPhoto.id);
+                    if (index >= 0) setMediaViewerIndex(index);
+                  }}>
+                    <img src={detailRepairPhoto.thumbUrl || detailRepairPhoto.url} alt="Po remonto nuotrauka" />
+                    <span>Peržiūrėti po remonto nuotrauką</span>
+                  </button>
+                ) : (
+                  <p className="completion-pending-missing-photo">Po remonto nuotrauka nerasta — paprašykite darbuotojo pridėti.</p>
+                )}
+                {canApproveCompletionRequest && (
+                  <div className="completion-pending-actions">
+                    <button type="button" className="secondary-button" disabled={completionActionSaving} onClick={() => void rejectCompletion()}>Grąžinti į vykdymą</button>
+                    <button type="button" className="primary-button complete-action-button" disabled={completionActionSaving} onClick={() => void approveCompletion()}>
+                      {completionActionSaving ? "Tvirtinama…" : "✓ Patvirtinti ir archyvuoti"}
+                    </button>
+                  </div>
+                )}
+                {!canApproveCompletionRequest && can(profile, "edit_records") && (
+                  <p className="completion-pending-note">
+                    {completionApproverLabel
+                      ? `Patvirtins: ${completionApproverLabel}.`
+                      : "Projekto nustatymuose pažymėkite, kas patvirtina užbaigtus brokus."}
+                  </p>
+                )}
+              </section>
+            )}
             <span className={statusClass(detail.status)}><i />{detail.status}</span>
             <p className="detail-created-by">Užregistravo: <b>{detail.createdByName || detail.createdByEmail || "—"}</b> · {detail.created}</p>
             {detailMetaDraft && isStaff && (
@@ -2820,13 +3200,15 @@ export default function Home({ initialData = null }: HomeProps) {
                     {detailMetaSaving ? "Saugoma…" : "Išsaugoti"}
                   </button>
                 )}
-                <button type="button" className="primary-button complete-action-button" onClick={() => void archiveDetail("complete")} disabled={completeSaving}>✓ Baigti</button>
+                {can(profile, "edit_records") && !detailPending && (
+                  <button type="button" className="primary-button complete-action-button" onClick={() => void archiveDetail("complete")} disabled={completeSaving}>✓ Baigti</button>
+                )}
               </>
             )}
           </div>
         </div>
       )}
-      {detailId && <button className="drawer-scrim" onClick={() => setDetailId(null)} aria-label="Uždaryti detalę" />}
+      {detailId && <button className={`drawer-scrim${planViewerOpen ? " drawer-scrim-over-plan" : ""}`} onClick={() => setDetailId(null)} aria-label="Uždaryti detalę" />}
 
       {reportMode && isStaff && (
         <div className="report-modal-layer" role="dialog" aria-modal="true" aria-labelledby="report-title">
@@ -2933,12 +3315,17 @@ export default function Home({ initialData = null }: HomeProps) {
           <button className="modal-scrim" onClick={() => !completeSaving && setCompleteOpen(false)} aria-label="Uždaryti" />
           <section className="capture-panel complete-panel">
             <div className="panel-handle" />
-            <div className="panel-title"><div><span>{detail.code}</span><h2 id="complete-title">Baigti įrašą</h2></div><button type="button" onClick={() => setCompleteOpen(false)} disabled={completeSaving} aria-label="Uždaryti">×</button></div>
-            <div className="complete-status-preview"><span className={statusClass(COMPLETED_STATUS)}><i />{COMPLETED_STATUS}</span><p>Nauja būsena po patvirtinimo</p></div>
-            <p className="complete-copy">Įrašas bus pažymėtas kaip <strong>Baigtas</strong> ir perkeltas į archyvą.</p>
+            <div className="panel-title"><div><span>{detail.code}</span><h2 id="complete-title">Prašyti užbaigti</h2></div><button type="button" onClick={() => setCompleteOpen(false)} disabled={completeSaving} aria-label="Uždaryti">×</button></div>
+            <div className="complete-status-preview"><span className={statusClass(PENDING_APPROVAL_STATUS)}><i />{PENDING_APPROVAL_STATUS}</span><p>Būsena po siuntimo patvirtinimui</p></div>
+            <p className="complete-copy">
+              Pridėkite <strong>po remonto nuotrauką</strong>.
+              {completionApproverLabel
+                ? ` Patvirtins: ${completionApproverLabel}.`
+                : " Projekto nustatymuose pažymėtas asmuo peržiūrės nuotrauką ir patvirtins archyvavimą."}
+            </p>
             <div className="complete-photo-block">
-              <strong>Po remonto nuotrauka (nebūtina)</strong>
-              <span>Parodykite, kaip atrodo po sutvarkymo.</span>
+              <strong>Po remonto nuotrauka (privaloma)</strong>
+              <span>Parodykite, kaip atrodo sutvarkytas brokas.</span>
               {completePhotoPreview ? (
                 <div className="complete-photo-preview">
                   <img src={completePhotoPreview} alt="Po remonto peržiūra" />
@@ -2957,7 +3344,7 @@ export default function Home({ initialData = null }: HomeProps) {
             </div>
             <div className="panel-actions">
               <button type="button" className="secondary-button" onClick={() => setCompleteOpen(false)} disabled={completeSaving}>Atšaukti</button>
-              <button type="button" className="primary-button complete-action-button" onClick={() => void confirmComplete()} disabled={completeSaving}>{completeSaving ? "Baigiama…" : "✓ Patvirtinti · Baigtas"}</button>
+              <button type="button" className="primary-button complete-action-button" onClick={() => void confirmComplete()} disabled={completeSaving || !completePhoto}>{completeSaving ? "Siunčiama…" : "Siųsti patvirtinimui"}</button>
             </div>
           </section>
         </div>

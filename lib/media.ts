@@ -58,6 +58,8 @@ const UPLOAD_JPEG_QUALITY = 0.78;
 const UPLOAD_SKIP_BELOW_BYTES = 500_000;
 const THUMB_MAX_SIDE = 480;
 const THUMB_JPEG_QUALITY = 0.72;
+export const PLAN_MAX_SIDE = 3600;
+export const PLAN_JPEG_QUALITY = 0.9;
 
 export function thumbObjectKeyFor(projectId: string, recordId: string, mediaId: string) {
   return `${projectId}/${recordId}/${mediaId}-thumb.jpg`;
@@ -114,6 +116,35 @@ export async function preparePhotoThumb(file: File): Promise<File | null> {
     if (!blob) return null;
     const base = file.name.replace(/\.[^.]+$/, "").slice(0, 60) || "thumb";
     return new File([blob], `${base}-thumb.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  } catch {
+    return null;
+  }
+}
+
+/** Aukšto planas: JPEG, ilgoji kraštinė ≤ 3600 px (brėžiniai lieka įskaitomi priartinus). */
+export async function preparePlanForUpload(file: File): Promise<{ file: File; width: number; height: number } | null> {
+  if (typeof window === "undefined" || typeof document === "undefined") return null;
+  if (!isImageFile(file) || file.type === "image/gif") return null;
+  try {
+    const image = await loadUploadImage(file);
+    const longest = Math.max(image.naturalWidth, image.naturalHeight, 1);
+    const scale = Math.min(1, PLAN_MAX_SIDE / longest);
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(image, 0, 0, width, height);
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/jpeg", PLAN_JPEG_QUALITY);
+    });
+    if (!blob) return null;
+    const base = file.name.replace(/\.[^.]+$/, "").slice(0, 70) || "planas";
+    return { file: new File([blob], `${base}.jpg`, { type: "image/jpeg", lastModified: Date.now() }), width, height };
   } catch {
     return null;
   }

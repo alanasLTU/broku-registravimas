@@ -17,7 +17,8 @@ export function isClientRecordType(value: string): value is ClientRecordTypeName
   return (clientRecordTypes as readonly string[]).includes(value);
 }
 
-export const statuses = ["Užregistruota", "Perduota sprendimui", "Vykdoma", "Sutvarkyta"] as const;
+export const statuses = ["Užregistruota", "Perduota sprendimui", "Vykdoma", "Laukia patvirtinimo", "Sutvarkyta"] as const;
+export const PENDING_APPROVAL_STATUS = "Laukia patvirtinimo" as const;
 export const COMPLETED_STATUS = "Sutvarkyta" as const;
 export const LEGACY_COMPLETED_STATUSES = ["Sutvarkyta", "Baigtas", "Uždaryta"] as const;
 export const priorities = ["Kritinis", "Aukštas", "Vidutinis", "Žemas"] as const;
@@ -59,6 +60,10 @@ export function isRecordArchived(record: { archived?: boolean }) {
 
 export function isRecordCompleted(record: { status?: string | null }) {
   return normalizeStatus(record.status) === COMPLETED_STATUS;
+}
+
+export function isRecordPendingApproval(record: { status?: string | null }) {
+  return normalizeStatus(record.status) === PENDING_APPROVAL_STATUS;
 }
 
 const STATUS_ALIASES: Record<string, (typeof statuses)[number]> = {

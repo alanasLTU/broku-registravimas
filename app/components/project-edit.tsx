@@ -2,13 +2,14 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import PhoneInput from "./phone-input";
-import { PROJECT_CONTACT_ROLE_LABELS, projectStatuses, type ProjectContactRole, type ProjectStatus } from "@/lib/constants";
+import { PROJECT_CONTACT_ROLE_LABELS, type ProjectContactRole, type ProjectStatus } from "@/lib/constants";
 
 type Project = {
   id: string;
   name: string;
   address: string;
   status?: ProjectStatus;
+  archived?: boolean;
 };
 
 type StructuredContact = {
@@ -19,6 +20,7 @@ type StructuredContact = {
   email: string;
   contactId?: string;
   notifyEmail: boolean;
+  approvesCompletion: boolean;
   manual: boolean;
 };
 
@@ -49,6 +51,8 @@ type Props = {
   currentUser: CurrentUser;
   onClose: () => void;
   onOpenProfile: () => void;
+  onArchive: () => void;
+  onRestore: () => void;
   onSave: (payload: {
     name: string;
     address: string;
@@ -63,19 +67,22 @@ type Props = {
       contactId?: string;
       profileId?: string;
       notifyEmail?: boolean;
+      approvesCompletion?: boolean;
     }>;
   }) => Promise<void>;
   onDelete: () => void;
 };
 
 function blankStructured(role: ProjectContactRole): StructuredContact {
+  const notify = role === "project_manager" || role === "coordinator";
   return {
     role,
     profileId: "",
     name: "",
     phone: "",
     email: "",
-    notifyEmail: role !== "works_manager",
+    notifyEmail: notify,
+    approvesCompletion: role !== "site_contact",
     manual: true,
   };
 }
@@ -99,7 +106,8 @@ function staffSnapshot(user: StaffUser | CurrentUser, currentUser: CurrentUser) 
   };
 }
 
-export default function ProjectEdit({ project, saving, currentUser, onClose, onOpenProfile, onSave, onDelete }: Props) {
+export default function ProjectEdit({ project, saving, currentUser, onClose, onOpenProfile, onArchive, onRestore, onSave, onDelete }: Props) {
+  const projectArchived = Boolean(project.archived) || project.status === "Baigtas";
   const [name, setName] = useState(project.name);
   const [address, setAddress] = useState(project.address ?? "");
   const [status, setStatus] = useState<ProjectStatus>(project.status ?? "Vykdomas");
@@ -166,6 +174,7 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
           category: string;
           work_scope: string;
           notify_email: boolean;
+          approves_completion?: boolean;
           profile_id: string | null;
           contacts: { id: string; name: string; phone: string; email: string } | null;
           profiles: { id: string; display_name: string; email: string; phone: string } | null;
@@ -186,6 +195,7 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
             contactId: contact?.id,
             profileId: item.profile_id ?? linked?.id ?? "",
             notifyEmail: item.notify_email,
+            approvesCompletion: item.approves_completion ?? (item.role === "project_manager" || item.role === "coordinator" || item.role === "works_manager"),
           };
           const structuredIndex = STRUCTURED_ROLES.indexOf(item.role as ProjectContactRole);
           if (structuredIndex >= 0) {
@@ -197,6 +207,7 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
               email: row.email,
               contactId: row.contactId,
               notifyEmail: row.notifyEmail,
+              approvesCompletion: row.approvesCompletion,
               manual: !row.profileId,
             };
           } else if (row.name.trim()) {
@@ -258,6 +269,7 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
         contactId: item.contactId,
         profileId: item.profileId || undefined,
         notifyEmail: item.notifyEmail,
+        approvesCompletion: item.approvesCompletion,
       }));
     const otherContacts = others
       .filter((item) => item.name.trim() && item.role.trim())
@@ -283,9 +295,13 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
           <label><span>Projekto pavadinimas *</span><input value={name} onChange={(event) => setName(event.target.value)} required autoFocus /></label>
           <label><span>Adresas</span><input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="Objekto adresas" /></label>
           <label><span>Būsena</span>
-            <select value={status} onChange={(event) => setStatus(event.target.value as ProjectStatus)}>
-              {projectStatuses.map((item) => <option key={item}>{item}</option>)}
-            </select>
+            {projectArchived ? (
+              <div className="project-archived-badge">Archyvuotas · duomenys saugomi, bet paslėpti iš aktyvaus sąrašo</div>
+            ) : (
+              <select value={status} onChange={(event) => setStatus(event.target.value as ProjectStatus)}>
+                <option value="Vykdomas">Vykdomas</option>
+              </select>
+            )}
           </label>
         </div>
 
@@ -301,7 +317,7 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
           <div className="project-contacts-head">
             <div>
               <strong>Projekto komanda</strong>
-              <p>Pasirinkite kolegą iš sąrašo arba įveskite kontaktą ranka. „Priskirti save“ užpildo iš jūsų paskyros.</p>
+              <p>Pasirinkite kolegą ir pažymėkite, kas gali patvirtinti užbaigtus brokus.</p>
             </div>
           </div>
           {structured.map((contact, index) => (
@@ -352,15 +368,28 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
                 </div>
               ) : null}
 
-              {contact.role !== "works_manager" ? (
-                <label className="project-contact-notify">
-                  <input
-                    type="checkbox"
-                    checked={contact.notifyEmail}
-                    onChange={(event) => updateStructured(index, { notifyEmail: event.target.checked })}
-                  />
-                  <span>Siųsti dienos suvestinę el. paštu</span>
-                </label>
+              {(contact.name.trim() || contact.profileId) ? (
+                <div className="project-contact-policy">
+                  <strong>Užbaigimo patvirtinimas</strong>
+                  {contact.role !== "works_manager" ? (
+                    <label className="project-contact-notify">
+                      <input
+                        type="checkbox"
+                        checked={contact.notifyEmail}
+                        onChange={(event) => updateStructured(index, { notifyEmail: event.target.checked })}
+                      />
+                      <span>Dienos suvestinė el. paštu</span>
+                    </label>
+                  ) : null}
+                  <label className="project-contact-notify">
+                    <input
+                      type="checkbox"
+                      checked={contact.approvesCompletion}
+                      onChange={(event) => updateStructured(index, { approvesCompletion: event.target.checked })}
+                    />
+                    <span>Gali patvirtinti užbaigtus brokus / darbus</span>
+                  </label>
+                </div>
               ) : null}
             </article>
           ))}
@@ -390,8 +419,30 @@ export default function ProjectEdit({ project, saving, currentUser, onClose, onO
           ))}
         </section>
 
+        <section className="project-danger-zone">
+          <div className="project-contacts-head">
+            <div>
+              <strong>Objekto valdymas</strong>
+              <p>Archyvuokite, kai darbai baigti — duomenys lieka. Ištrinkite tik jei objektas sukurtas per klaidą.</p>
+            </div>
+          </div>
+          <div className="project-danger-actions">
+            {projectArchived ? (
+              <button type="button" className="secondary-button" onClick={onRestore} disabled={saving}>
+                Grąžinti į aktyvius
+              </button>
+            ) : (
+              <button type="button" className="secondary-button" onClick={onArchive} disabled={saving}>
+                Archyvuoti objektą
+              </button>
+            )}
+            <button type="button" className="danger-button" onClick={onDelete} disabled={saving}>
+              Ištrinti visam laikui
+            </button>
+          </div>
+        </section>
+
         <div className="panel-actions project-edit-actions">
-          <button type="button" className="danger-button" onClick={onDelete} disabled={saving}>Ištrinti</button>
           <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>Atšaukti</button>
           <button type="submit" className="primary-button" disabled={saving || !name.trim()}>{saving ? "Saugoma…" : "Išsaugoti"}</button>
         </div>

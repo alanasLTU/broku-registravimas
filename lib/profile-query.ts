@@ -126,18 +126,48 @@ export async function selectLinkedProfile(client: SupabaseClient, profileId: str
   return { data: fallback.data ? { ...fallback.data, phone: "" } : null, error: null };
 }
 
+const PROJECT_CONTACTS_WITH_POLICY =
+  "id, role, category, work_scope, notify_email, approves_completion, profile_id, contacts(id, name, phone, email), profiles(id, display_name, email, phone)";
 const PROJECT_CONTACTS_WITH_PHONE =
   "id, role, category, work_scope, notify_email, profile_id, contacts(id, name, phone, email), profiles(id, display_name, email, phone)";
 const PROJECT_CONTACTS_BASE =
   "id, role, category, work_scope, notify_email, profile_id, contacts(id, name, phone, email), profiles(id, display_name, email)";
 
+function missingPolicyColumns(error: { message?: string } | null | undefined) {
+  const message = error?.message?.toLowerCase() ?? "";
+  return message.includes("approves_completion")
+    && (message.includes("does not exist") || message.includes("column"));
+}
+
+function withPolicyDefaults<T extends { role?: string }>(row: T) {
+  const role = row.role ?? "";
+  const legacyApprove = role === "project_manager" || role === "coordinator" || role === "works_manager";
+  return {
+    ...row,
+    approves_completion: legacyApprove,
+  };
+}
+
 export async function selectProjectContacts(client: SupabaseClient, projectId: string) {
+  const withPolicy = await client
+    .from("project_contacts")
+    .select(PROJECT_CONTACTS_WITH_POLICY)
+    .eq("project_id", projectId)
+    .order("role");
+  if (!withPolicy.error) return withPolicy;
+  if (!missingPolicyColumns(withPolicy.error) && !missingPhoneColumn(withPolicy.error)) return withPolicy;
+
   const withPhone = await client
     .from("project_contacts")
     .select(PROJECT_CONTACTS_WITH_PHONE)
     .eq("project_id", projectId)
     .order("role");
-  if (!withPhone.error) return withPhone;
+  if (!withPhone.error) {
+    return {
+      data: (withPhone.data ?? []).map((row) => withPolicyDefaults(row)),
+      error: null,
+    };
+  }
   if (!missingPhoneColumn(withPhone.error)) return withPhone;
 
   const fallback = await client
@@ -147,7 +177,7 @@ export async function selectProjectContacts(client: SupabaseClient, projectId: s
     .order("role");
   if (fallback.error) return fallback;
   return {
-    data: (fallback.data ?? []).map((row) => ({
+    data: (fallback.data ?? []).map((row) => withPolicyDefaults({
       ...row,
       profiles: row.profiles ? { ...row.profiles, phone: "" } : row.profiles,
     })),
