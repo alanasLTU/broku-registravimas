@@ -1,5 +1,5 @@
 import { apiError, requireUser } from "@/lib/auth";
-import { MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES } from "@/lib/constants";
+import { MAX_MEDIA_BATCH, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES } from "@/lib/constants";
 import { mediaProxyUrl, mediaThumbUrl } from "@/lib/media-url";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +27,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const existingVideos = (existing ?? []).filter((item) => item.media_kind === "video").length;
 
     const payload = await request.json() as { media?: MediaPayload[] };
-    const incoming = (payload.media ?? []).slice(0, MAX_PHOTOS + MAX_VIDEOS);
+    const incoming = (payload.media ?? []).slice(0, MAX_MEDIA_BATCH);
     if (!incoming.length) return Response.json({ error: "Nėra įkeltų failų." }, { status: 400 });
 
     const prefix = `${record.project_id}/${id}/`;
@@ -58,8 +58,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const photoCount = rows.filter((row) => row.media_kind === "photo").length;
     const videoCount = rows.filter((row) => row.media_kind === "video").length;
-    if (existingPhotos + photoCount > MAX_PHOTOS || existingVideos + videoCount > MAX_VIDEOS) {
-      return Response.json({ error: `Prie įrašo galima pridėti iki ${MAX_PHOTOS} nuotraukų ir ${MAX_VIDEOS} video.` }, { status: 400 });
+    if (existingVideos + videoCount > MAX_VIDEOS) {
+      return Response.json({ error: `Prie įrašo galima pridėti iki ${MAX_VIDEOS} video.` }, { status: 400 });
     }
 
     const { data: inserted, error } = await supabase.from("record_media").insert(rows).select("*");

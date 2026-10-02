@@ -1,5 +1,5 @@
 import { apiError, requirePermission, requireUser } from "@/lib/auth";
-import { canApproveCompletion, recordHasRepairPhoto } from "@/lib/completion-approval";
+import { canApproveCompletion, hasCompletionEvidence, recordHasRepairPhoto } from "@/lib/completion-approval";
 import {
   COMPLETED_STATUS,
   isClientRecordType,
@@ -94,10 +94,12 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       if (normalizeStatus(before.status) === COMPLETED_STATUS) {
         return Response.json({ error: "Įrašas jau pažymėtas kaip sutvarkytas." }, { status: 400 });
       }
+      const completionComment = typeof payload.resolution === "string" ? payload.resolution.trim() : "";
       const hasPhoto = await recordHasRepairPhoto(supabase, id);
-      if (!hasPhoto) {
-        return Response.json({ error: "Prieš siunčiant patvirtinimui pridėkite po remonto nuotrauką." }, { status: 400 });
+      if (!hasCompletionEvidence(completionComment, hasPhoto)) {
+        return Response.json({ error: "Prieš siunčiant patvirtinimui užpildykite komentarą arba pridėkite po remonto nuotrauką." }, { status: 400 });
       }
+      if (completionComment) updates.resolution = completionComment.slice(0, 4000);
       updates.status = PENDING_APPROVAL_STATUS;
       updates.completion_requested_by = profile.id;
       updates.completion_requested_at = new Date().toISOString();

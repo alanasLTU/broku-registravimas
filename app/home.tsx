@@ -1,8 +1,10 @@
 "use client";
 
 import { DragEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import PhotoEditor from "./components/photo-editor";
 import MediaViewer, { type MediaViewerItem } from "./components/media-viewer";
+import MediaImage from "./components/media-image";
 import RecordThumb from "./components/record-thumb";
 import MediaFileButton from "./components/media-file-button";
 import ResponsiblePicker from "./components/responsible-picker";
@@ -13,18 +15,20 @@ import DateInput from "./components/date-input";
 import InvoiceCapture from "./components/invoice-capture";
 import InvoiceList from "./components/invoice-list";
 import InvoiceReportModal from "./components/invoice-report-modal";
+import AddressNavigationPicker from "./components/address-navigation-picker";
 import PlanViewer, { type PlanPinRecord } from "./components/plan-viewer";
+import { toast as notify } from "sonner";
 import { canApproveCompletionClient } from "@/lib/completion-approval";
-import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, ARCHIVED_TAB, COMPLETED_STATUS, MAX_PHOTOS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, PENDING_APPROVAL_STATUS, PROJECT_CONTACT_ROLE_LABELS, clientRecordTypes, isProjectCompleted, isRecordArchived, isRecordPendingApproval, normalizeProjectStatus, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectContactRole, type ProjectStatus } from "@/lib/constants";
+import { ACTIVE_PROJECT_STORAGE_KEY, ACTIVE_TYPE_STORAGE_KEY, ARCHIVED_TAB, COMPLETED_STATUS, MAX_VIDEOS, MAX_PHOTO_BYTES, MAX_VIDEO_BYTES, MEDIA_BUCKET, PENDING_APPROVAL_STATUS, PROJECT_CONTACT_ROLE_LABELS, clientRecordTypes, isProjectCompleted, isRecordArchived, isRecordPendingApproval, normalizeProjectStatus, normalizeStatus, recordTypes as recordTypeList, responsibilities, RESPONSIBLE_OTHER, statuses as statusList, type ProjectContactRole, type ProjectStatus } from "@/lib/constants";
 import { buildResponsiblePayload, normalizeResponsibleParty, responsibleClassSlug, responsibleDisplay, responsibleOtherText, type ResponsibleParty } from "@/lib/responsible";
 import { DEFAULT_REPORT_OPTIONS, REPORT_OPTION_LABELS, buildReportFieldRows, type ReportOptions } from "@/lib/report-fields";
-import { preparePrintImages } from "@/lib/print-images";
+import { preparePrintImages, waitForPrintReportImages } from "@/lib/print-images";
 import type { PermissionKey } from "@/lib/permissions";
 import { isInternalRole } from "@/lib/permissions";
 import { copyText, shareOrCopyText } from "@/lib/copy-text";
 import { createBrowserSupabase } from "@/lib/supabase/client";
 import { errorMessage } from "@/lib/errors";
-import { imageTooLarge, isImageFile, isVideoFile, mediaFileName, mimeOf, pickInvoiceUploadFile, preparePhotoForUpload, preparePhotoThumb, thumbObjectKeyFor, videoTooLarge } from "@/lib/media";
+import { HEIC_UPLOAD_ERROR, imageTooLarge, isHeicLike, isImageFile, isVideoFile, mediaFileName, mimeOf, pickInvoiceUploadFile, preparePhotoForUpload, preparePhotoThumb, thumbObjectKeyFor, videoTooLarge } from "@/lib/media";
 import type { RegisterPayload } from "@/lib/register-data";
 import { formatMoneyEuro, matchesInvoiceSearch, type Invoice } from "@/lib/invoices";
 import type { ProjectPlan } from "@/lib/plans";
@@ -56,6 +60,7 @@ type Project = {
 type DefectPhoto = {
   id: string;
   url: string;
+  viewUrl?: string;
   thumbUrl?: string;
   caption: string;
   kind?: "photo";
@@ -298,9 +303,18 @@ function defectVideosFor(defect: Defect | null): DefectVideo[] {
 }
 
 function defectMediaFor(defect: Defect | null): MediaViewerItem[] {
+  const recordId = defect?.id ?? "";
   return [
-    ...defectPhotosFor(defect).map((item) => ({ id: item.id, url: item.url, thumbUrl: item.thumbUrl, kind: "photo" as const, caption: item.caption, fileName: item.fileName })),
-    ...defectVideosFor(defect).map((item) => ({ id: item.id, url: item.url, kind: "video" as const, caption: item.caption, fileName: item.fileName })),
+    ...defectPhotosFor(defect).map((item) => ({
+      id: item.id,
+      recordId,
+      url: item.viewUrl || item.url,
+      thumbUrl: item.thumbUrl,
+      kind: "photo" as const,
+      caption: item.caption,
+      fileName: item.fileName,
+    })),
+    ...defectVideosFor(defect).map((item) => ({ id: item.id, recordId, url: item.url, kind: "video" as const, caption: item.caption, fileName: item.fileName })),
   ];
 }
 
@@ -382,6 +396,8 @@ export default function Home({ initialData = null }: HomeProps) {
   const [invoiceReportOpen, setInvoiceReportOpen] = useState(false);
   const [planViewerOpen, setPlanViewerOpen] = useState(false);
   const [planFocusRecordId, setPlanFocusRecordId] = useState<string | null>(null);
+  const [planAttachRecordId, setPlanAttachRecordId] = useState<string | null>(null);
+  const [planMoveRecordId, setPlanMoveRecordId] = useState<string | null>(null);
   const [planPickForCapture, setPlanPickForCapture] = useState(false);
   const [captureFinalizeOnMap, setCaptureFinalizeOnMap] = useState(false);
   const [projectPlans, setProjectPlans] = useState<ProjectPlan[]>([]);
@@ -393,6 +409,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const [captureRecordType, setCaptureRecordType] = useState<RecordType>("Brokas");
   const [detailId, setDetailId] = useState<string | null>(null);
   const [reportMode, setReportMode] = useState(false);
+  const [pdfPrinting, setPdfPrinting] = useState(false);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [photoDrafts, setPhotoDrafts] = useState<PhotoDraft[]>([]);
   const [videoDrafts, setVideoDrafts] = useState<VideoDraft[]>([]);
@@ -436,16 +453,17 @@ export default function Home({ initialData = null }: HomeProps) {
   const [pullOffset, setPullOffset] = useState(0);
   const refreshInFlight = useRef(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const registerCardRef = useRef<HTMLElement>(null);
   const pullStartY = useRef<number | null>(null);
   const pullArmed = useRef(false);
   const pullOffsetRef = useRef(0);
-  const [toast, setToast] = useState("");
+  const lastQuietRefreshAt = useRef(0);
   const [photoEditorTarget, setPhotoEditorTarget] = useState<PhotoEditorTarget | null>(null);
   const [photoEditorSaving, setPhotoEditorSaving] = useState(false);
   const [annotatePromptPhotoId, setAnnotatePromptPhotoId] = useState<string | null>(null);
   const [completeOpen, setCompleteOpen] = useState(false);
-  const [completePhoto, setCompletePhoto] = useState<File | null>(null);
-  const [completePhotoPreview, setCompletePhotoPreview] = useState<string | null>(null);
+  const [completeComment, setCompleteComment] = useState("");
+  const [completePhotoDrafts, setCompletePhotoDrafts] = useState<PhotoDraft[]>([]);
   const [completeSaving, setCompleteSaving] = useState(false);
   const [completionActionSaving, setCompletionActionSaving] = useState(false);
   const [linkedTaskOpen, setLinkedTaskOpen] = useState(false);
@@ -502,7 +520,7 @@ export default function Home({ initialData = null }: HomeProps) {
           });
           const joinPayload = await joinResponse.json() as { projectId?: string; error?: string };
           if (!joinResponse.ok || !joinPayload.projectId) {
-            if (active) setToast(joinPayload.error || "Nepavyko prisijungti prie projekto");
+            if (active) showToast(joinPayload.error || "Nepavyko prisijungti prie projekto");
           } else {
             joinedProjectId = joinPayload.projectId;
           }
@@ -511,7 +529,7 @@ export default function Home({ initialData = null }: HomeProps) {
           const validatePayload = await validateResponse.json() as { status?: string; email?: string };
           if (validatePayload.status === "used") {
             if (active) {
-              setToast("Kvietimas jau panaudotas — esate prisijungę.");
+              showToast("Kvietimas jau panaudotas — esate prisijungę.");
               window.history.replaceState({}, "", "/");
             }
           } else if (validatePayload.status === "open") {
@@ -522,12 +540,12 @@ export default function Home({ initialData = null }: HomeProps) {
             });
             const invitePayload = await inviteResponse.json() as { projectId?: string; error?: string };
             if (!inviteResponse.ok || !invitePayload.projectId) {
-              if (active) setToast(invitePayload.error || "Nepavyko priimti kvietimo");
+              if (active) showToast(invitePayload.error || "Nepavyko priimti kvietimo");
             } else {
               joinedProjectId = invitePayload.projectId;
             }
           } else if (active) {
-            setToast("Kvietimo nuoroda nebegalioja");
+            showToast("Kvietimo nuoroda nebegalioja");
             window.history.replaceState({}, "", "/");
           }
         }
@@ -552,7 +570,7 @@ export default function Home({ initialData = null }: HomeProps) {
         );
         if (joinedProjectId) {
           const name = data.projects.find((project) => project.id === joinedProjectId)?.name ?? "objektas";
-          setToast(`Prisijungta prie objekto: ${name}`);
+          showToast(`Prisijungta prie objekto: ${name}`);
         }
         if (join || invite) window.history.replaceState({}, "", "/");
         setConnection("synced");
@@ -614,6 +632,9 @@ export default function Home({ initialData = null }: HomeProps) {
   useEffect(() => {
     function onVisibilityChange() {
       if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastQuietRefreshAt.current < 45_000) return;
+      lastQuietRefreshAt.current = now;
       void refreshRegister({ quiet: true });
     }
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -655,6 +676,7 @@ export default function Home({ initialData = null }: HomeProps) {
   }, [staffUsers]);
 
   useEffect(() => {
+    if (initialData?.user?.id) return;
     void fetch("/api/me")
       .then((response) => response.json())
       .then((payload: { profile?: { id: string; displayName: string; email: string; phone: string } }) => {
@@ -668,7 +690,7 @@ export default function Home({ initialData = null }: HomeProps) {
         }));
       })
       .catch(() => undefined);
-  }, []);
+  }, [initialData?.user?.id]);
 
   useEffect(() => {
     const modalOpen = captureOpen || reportMode || Boolean(detailId) || completeOpen || mediaViewerIndex != null || Boolean(photoEditorTarget) || projectPickerOpen || filtersOpen || inviteOpen || newProjectOpen || Boolean(editProjectId) || profileSettingsOpen || planViewerOpen;
@@ -696,9 +718,12 @@ export default function Home({ initialData = null }: HomeProps) {
     return () => window.cancelAnimationFrame(frame);
   }, [detailId]);
 
-  function showToast(message: string) {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 3200);
+  function showToast(message: string, id?: string | number) {
+    const text = message.trim();
+    if (!text) return;
+    if (/nepavyko|klaida|negalioja|nerast/i.test(text)) notify.error(text, { id });
+    else if (/pasirinkite|nurodykite|įveskite|įkelkite|įrašykite|uzpildykite|užpildykite|nutempkite|per didel|negali|nėra |baigtas|nepažymėt|demonstracin|laikykite|pirmiausia|jau panaudot|nuoroda nepriskyrė/i.test(text)) notify.warning(text, { id });
+    else notify.success(text, { id });
   }
 
   function canPullToRefresh() {
@@ -910,7 +935,7 @@ export default function Home({ initialData = null }: HomeProps) {
   const detailPhotos = defectPhotosFor(detail);
   const detailVideos = defectVideosFor(detail);
   const detailPending = Boolean(detail && isRecordPendingApproval(detail));
-  const detailRepairPhoto = detailPhotos.find((photo) => photo.caption.toLowerCase().includes("po remonto")) ?? detailPhotos.at(-1) ?? null;
+  const detailRepairPhoto = detailPhotos.find((photo) => photo.caption.toLowerCase().includes("po remonto")) ?? null;
   const completionApprovers = useMemo(
     () => projectContactPolicies.filter((item) => item.approvesCompletion),
     [projectContactPolicies],
@@ -920,6 +945,17 @@ export default function Home({ initialData = null }: HomeProps) {
     [completionApprovers],
   );
   const detailHasPlanPin = Boolean(detail && recordHasPlanPin(detail));
+  const detailPlan = detail?.planId ? projectPlans.find((plan) => plan.id === detail.planId) ?? null : null;
+  const canManagePlanPin = Boolean(
+    detail
+    && !projectCompleted
+    && projectPlans.length > 0
+    && (isStaff || can(profile, "edit_records")),
+  );
+  const drawerPlanInteraction = Boolean(
+    planViewerOpen && detailId && (planAttachRecordId || planMoveRecordId),
+  );
+  const drawerOverPlan = Boolean(planViewerOpen && detailId);
   const canApproveCompletionRequest = Boolean(
     detailPending
     && profile
@@ -953,7 +989,21 @@ export default function Home({ initialData = null }: HomeProps) {
   }, [activeStatus, createdByFilter, executorFilter, originFilter, priorityFilter, responsibleFilter, roomFilter, titleFilter, typeFilter]);
   const openCount = activeProjectDefects.length;
   const today = new Date().toISOString().slice(0, 10);
-  const overdueCount = activeProjectDefects.filter((defect) => defect.due !== "Nenustatyta" && defect.due < today).length;
+  const fixedCount = activeProjectDefects.filter((defect) => defect.status === COMPLETED_STATUS).length;
+  const inProgressCount = activeProjectDefects.filter((defect) => defect.status === "Vykdoma").length;
+
+  function metricCardClass(active: boolean) {
+    return `metric-card-btn${active ? " is-active" : ""}`;
+  }
+
+  function applyMetricFilter(status: Status | "Visi" | typeof ARCHIVED_TAB) {
+    setRegisterTab("records");
+    setActiveStatus(status);
+    setFiltersOpen(false);
+    requestAnimationFrame(() => {
+      registerCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
 
   function openCapture() {
     if (projectCompleted) {
@@ -972,6 +1022,8 @@ export default function Home({ initialData = null }: HomeProps) {
       showToast("Pasirinkite objektą.");
       return;
     }
+    setPlanAttachRecordId(null);
+    setPlanMoveRecordId(null);
     setPlanPickForCapture(false);
     setCaptureFinalizeOnMap(false);
     setPlanFocusRecordId(null);
@@ -987,11 +1039,51 @@ export default function Home({ initialData = null }: HomeProps) {
       showToast("Šiam objektui dar nėra plano.");
       return;
     }
+    setPlanAttachRecordId(null);
+    setPlanMoveRecordId(null);
     setPlanPickForCapture(false);
     setCaptureFinalizeOnMap(false);
     setPlanFocusRecordId(record.id);
-    setDetailId(null);
     setPlanViewerOpen(true);
+  }
+
+  function openDetailMarkOnPlan(record: Defect) {
+    if (projectCompleted) {
+      showToast("Projektas baigtas. Pakeiskite būseną į „Vykdomas“, jei vėl fiksuojate.");
+      return;
+    }
+    if (!projectPlans.length) {
+      showToast("Šiam objektui dar nėra plano.");
+      return;
+    }
+    setPlanAttachRecordId(record.id);
+    setPlanMoveRecordId(null);
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
+    setPlanFocusRecordId(null);
+    setPlanViewerOpen(true);
+  }
+
+  function openDetailMoveOnPlan(record: Defect) {
+    if (!recordHasPlanPin(record)) {
+      openDetailMarkOnPlan(record);
+      return;
+    }
+    if (!projectPlans.length) {
+      showToast("Šiam objektui dar nėra plano.");
+      return;
+    }
+    setPlanAttachRecordId(null);
+    setPlanMoveRecordId(record.id);
+    setPlanPickForCapture(false);
+    setCaptureFinalizeOnMap(false);
+    setPlanFocusRecordId(record.id);
+    setPlanViewerOpen(true);
+  }
+
+  async function detachDetailPlanPin(record: Defect) {
+    if (!window.confirm(`Nuimti „${record.code}“ nuo plano? Įrašas liks, tik smeigtukas dings.`)) return;
+    await updateRecordPlanPin(record.id, null);
   }
 
   function openCapturePickOnMapFromForm() {
@@ -1016,6 +1108,8 @@ export default function Home({ initialData = null }: HomeProps) {
   function closePlanViewer() {
     setPlanViewerOpen(false);
     setPlanFocusRecordId(null);
+    setPlanAttachRecordId(null);
+    setPlanMoveRecordId(null);
     if (captureFinalizeOnMap) {
       setPlanPickForCapture(false);
       setCaptureFinalizeOnMap(false);
@@ -1044,21 +1138,39 @@ export default function Home({ initialData = null }: HomeProps) {
     setCaptureFinalizeOnMap(false);
   }
 
-  async function attachRecordToPlan(recordId: string, planId: string, x: number, y: number) {
+  async function updateRecordPlanPin(recordId: string, planId: string | null, x?: number, y?: number) {
+    const body = planId === null
+      ? { planId: null }
+      : { planId, planX: x, planY: y };
     const response = await fetch(`/api/defects/${recordId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ planId, planX: x, planY: y }),
+      body: JSON.stringify(body),
     });
     const payload = await response.json() as { defect?: Defect; error?: string };
-    if (!response.ok || !payload.defect) throw new Error(payload.error || "Nepavyko prisegti");
+    if (!response.ok || !payload.defect) throw new Error(payload.error || "Nepavyko atnaujinti smeigtuko");
     setDefects((items) => items.map((item) => item.id === recordId ? {
       ...item,
-      planId: payload.defect!.planId ?? planId,
-      planX: payload.defect!.planX ?? x,
-      planY: payload.defect!.planY ?? y,
+      planId: payload.defect!.planId ?? null,
+      planX: payload.defect!.planX ?? null,
+      planY: payload.defect!.planY ?? null,
     } : item));
-    showToast("Smeigtukas pridėtas");
+    showToast(planId === null ? "Smeigtukas nuimtas nuo plano" : "Smeigtukas perkeltas");
+  }
+
+  async function attachRecordToPlan(recordId: string, planId: string, x: number, y: number) {
+    await updateRecordPlanPin(recordId, planId, x, y);
+    if (planAttachRecordId === recordId) {
+      setPlanAttachRecordId(null);
+      setPlanViewerOpen(false);
+    }
+  }
+
+  function handlePlanPinMoved(recordId: string) {
+    if (planMoveRecordId === recordId) {
+      setPlanMoveRecordId(null);
+      setPlanViewerOpen(false);
+    }
   }
 
   function openInvoiceCapture() {
@@ -1193,6 +1305,7 @@ export default function Home({ initialData = null }: HomeProps) {
     };
     const drafts = { photos: [...photoDrafts], videos: [...videoDrafts] };
     setCaptureSaving(true);
+    const waitId = notify.loading(drafts.photos.length || drafts.videos.length ? "Saugomas įrašas ir medija…" : "Saugomas įrašas…");
     try {
       const response = await fetch("/api/defects", {
         method: "POST",
@@ -1212,7 +1325,7 @@ export default function Home({ initialData = null }: HomeProps) {
       setVideoDrafts([]);
       setIssueDrafts([blankIssue()]);
       if (pendingPlanPin && !planPin) setPlanViewerOpen(true);
-      showToast(`${saved.code} išsaugotas`);
+      showToast(`${saved.code} išsaugotas`, waitId);
       if (drafts.photos.length || drafts.videos.length) {
         try {
           const uploaded = await uploadMediaToRecord(saved.id, saved.projectId, drafts.photos, drafts.videos);
@@ -1231,7 +1344,7 @@ export default function Home({ initialData = null }: HomeProps) {
       drafts.videos.forEach((video) => URL.revokeObjectURL(video.url));
       return true;
     } catch (error) {
-      showToast(errorMessage(error, "Nepavyko išsaugoti įrašo"));
+      showToast(errorMessage(error, "Nepavyko išsaugoti įrašo"), waitId);
       return false;
     } finally {
       setCaptureSaving(false);
@@ -1252,7 +1365,10 @@ export default function Home({ initialData = null }: HomeProps) {
     ];
     for (const item of all) {
       const mediaId = randomId();
-      const uploadFile = item.kind === "photo" ? await preparePhotoForUpload(item.file) : item.file;
+      let uploadFile = item.kind === "photo" ? await preparePhotoForUpload(item.file) : item.file;
+      if (item.kind === "photo" && isHeicLike(uploadFile)) {
+        throw new Error(HEIC_UPLOAD_ERROR);
+      }
       const fileName = mediaFileName(uploadFile, item.kind);
       const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "-").slice(-90) || item.kind;
       const objectKey = `${nextProjectId}/${recordId}/${mediaId}-${safeName}`;
@@ -1298,12 +1414,8 @@ export default function Home({ initialData = null }: HomeProps) {
   function appendPhotoDrafts(incomingFiles: File[], options?: { promptAnnotate?: boolean }) {
     const files = incomingFiles.filter((file) => isImageFile(file) && !imageTooLarge(file));
     if (!files.length) return showToast("Pasirinkite nuotrauką iki 10 MB");
-    const freeSlots = Math.max(0, MAX_PHOTOS - photoDrafts.length);
-    const accepted = files.slice(0, freeSlots);
-    if (!accepted.length) return showToast(`Prie vieno įrašo galima pridėti iki ${MAX_PHOTOS} nuotraukų`);
-    const added = accepted.map((file) => ({ id: randomId(), file, url: URL.createObjectURL(file), caption: "" }));
+    const added = files.map((file) => ({ id: randomId(), file, url: URL.createObjectURL(file), caption: "" }));
     setPhotoDrafts((items) => [...items, ...added]);
-    if (accepted.length < files.length) showToast(`Pridėta ${accepted.length} iš ${files.length} pasirinktų nuotraukų`);
     if (options?.promptAnnotate && added.length === 1) setAnnotatePromptPhotoId(added[0].id);
   }
 
@@ -1712,9 +1824,8 @@ export default function Home({ initialData = null }: HomeProps) {
   async function archiveDetail(kind: "complete" | "delete") {
     if (!detailId) return;
     if (kind === "complete") {
-      setCompletePhoto(null);
-      if (completePhotoPreview) URL.revokeObjectURL(completePhotoPreview);
-      setCompletePhotoPreview(null);
+      clearCompletePhotoDrafts();
+      setCompleteComment("");
       setCompleteOpen(true);
       return;
     }
@@ -1733,32 +1844,35 @@ export default function Home({ initialData = null }: HomeProps) {
 
   async function confirmComplete() {
     if (!detailId) return;
-    if (!completePhoto) {
-      showToast("Pridėkite po remonto nuotrauką");
+    const comment = completeComment.trim();
+    if (!comment && !completePhotoDrafts.length) {
+      showToast("Užpildykite komentarą arba pridėkite nuotrauką");
       return;
     }
     const id = detailId;
-    const photo = completePhoto;
+    const drafts = completePhotoDrafts.map((item) => ({ ...item, caption: "Po remonto" }));
     setCompleteOpen(false);
-    setCompletePhoto(null);
-    if (completePhotoPreview) URL.revokeObjectURL(completePhotoPreview);
-    setCompletePhotoPreview(null);
+    setCompletePhotoDrafts([]);
+    setCompleteComment("");
     setCompleteSaving(true);
     try {
-      const draft: PhotoDraft = { id: randomId(), file: photo, url: URL.createObjectURL(photo), caption: "Po remonto" };
-      try {
-        const uploaded = await uploadMediaToRecord(id, resolvedProjectId, [draft], []);
-        setDefects((items) => items.map((item) => item.id === id ? {
-          ...item,
-          photos: [...defectPhotosFor(item), ...uploaded.filter((media) => media.kind !== "video") as DefectPhoto[]],
-          photo: item.photo ?? uploaded.find((media) => media.kind !== "video")?.url,
-        } : item));
-      } finally {
-        URL.revokeObjectURL(draft.url);
+      if (drafts.length) {
+        try {
+          const uploaded = await uploadMediaToRecord(id, resolvedProjectId, drafts, []);
+          setDefects((items) => items.map((item) => item.id === id ? {
+            ...item,
+            photos: [...defectPhotosFor(item), ...uploaded.filter((media) => media.kind !== "video") as DefectPhoto[]],
+            photo: item.photo ?? uploaded.find((media) => media.kind !== "video")?.url,
+          } : item));
+        } finally {
+          drafts.forEach((item) => URL.revokeObjectURL(item.url));
+        }
       }
-      const saved = await persistPatch(id, { requestCompletion: true } as Partial<Defect>);
+      const saved = await persistPatch(id, {
+        requestCompletion: true,
+        ...(comment ? { resolution: comment } : {}),
+      } as Partial<Defect>);
       if (!saved) return;
-      setActiveStatus(PENDING_APPROVAL_STATUS);
       showToast("Užbaigimas perduotas patvirtinimui");
     } catch (error) {
       showToast(errorMessage(error, "Siųsti patvirtinimui nepavyko"));
@@ -1776,7 +1890,6 @@ export default function Home({ initialData = null }: HomeProps) {
       const saved = await persistPatch(id, { approveCompletion: true } as Partial<Defect>);
       if (!saved) return;
       setDetailId(null);
-      setActiveStatus(ARCHIVED_TAB);
       showToast("✓ Užbaigimas patvirtintas · įrašas archyvuotas");
     } finally {
       setCompletionActionSaving(false);
@@ -1791,29 +1904,48 @@ export default function Home({ initialData = null }: HomeProps) {
     try {
       const saved = await persistPatch(id, { rejectCompletion: true } as Partial<Defect>);
       if (!saved) return;
-      setActiveStatus("Vykdoma");
       showToast("Užbaigimas atmestas · brokas grąžintas į vykdymą");
     } finally {
       setCompletionActionSaving(false);
     }
   }
 
-  function handleCompletePhoto(files: FileList) {
-    const file = files[0];
-    if (!file) return;
-    if (!isImageFile(file) || imageTooLarge(file)) {
-      showToast("Pasirinkite nuotrauką iki 10 MB");
-      return;
-    }
-    if (completePhotoPreview) URL.revokeObjectURL(completePhotoPreview);
-    setCompletePhoto(file);
-    setCompletePhotoPreview(URL.createObjectURL(file));
+  function clearCompletePhotoDrafts() {
+    setCompletePhotoDrafts((items) => {
+      items.forEach((item) => URL.revokeObjectURL(item.url));
+      return [];
+    });
   }
 
-  function clearCompletePhoto() {
-    if (completePhotoPreview) URL.revokeObjectURL(completePhotoPreview);
-    setCompletePhoto(null);
-    setCompletePhotoPreview(null);
+  function closeCompleteModal() {
+    if (completeSaving) return;
+    clearCompletePhotoDrafts();
+    setCompleteComment("");
+    setCompleteOpen(false);
+  }
+
+  function appendCompletePhotos(incomingFiles: File[]) {
+    const files = incomingFiles.filter((file) => isImageFile(file) && !imageTooLarge(file));
+    if (!files.length) return showToast("Pasirinkite nuotrauką iki 10 MB");
+    const added = files.map((file) => ({
+      id: randomId(),
+      file,
+      url: URL.createObjectURL(file),
+      caption: "Po remonto",
+    }));
+    setCompletePhotoDrafts((items) => [...items, ...added]);
+  }
+
+  function removeCompletePhotoDraft(id: string) {
+    setCompletePhotoDrafts((items) => {
+      const removed = items.find((item) => item.id === id);
+      if (removed) URL.revokeObjectURL(removed.url);
+      return items.filter((item) => item.id !== id);
+    });
+  }
+
+  function handleCompletePhoto(files: FileList) {
+    appendCompletePhotos(Array.from(files));
   }
 
   async function restoreDetail() {
@@ -1860,11 +1992,11 @@ export default function Home({ initialData = null }: HomeProps) {
     if (!detailId || !resolvedProjectId) return;
     const files = incomingFiles.filter((file) => kind === "photo" ? isImageFile(file) && !imageTooLarge(file) : isVideoFile(file) && !videoTooLarge(file));
     if (!files.length) return showToast(kind === "photo" ? "Pasirinkite nuotrauką iki 10 MB" : "Pasirinkite video iki 40 MB");
-    const maxCount = kind === "photo" ? MAX_PHOTOS : MAX_VIDEOS;
-    const existingCount = kind === "photo" ? detailPhotos.length : detailVideos.length;
-    const selected = files.slice(0, Math.max(0, maxCount - existingCount));
-    if (!selected.length) return showToast(kind === "photo" ? `Galima pridėti iki ${MAX_PHOTOS} nuotraukų` : `Galima pridėti ${MAX_VIDEOS} video`);
+    const existingCount = kind === "video" ? detailVideos.length : 0;
+    const selected = kind === "photo" ? files : files.slice(0, Math.max(0, MAX_VIDEOS - existingCount));
+    if (!selected.length) return showToast(`Galima pridėti ${MAX_VIDEOS} video`);
     const drafts = selected.map((file) => ({ id: randomId(), file, url: URL.createObjectURL(file), caption: "", fileName: file.name }));
+    const waitId = notify.loading(kind === "photo" ? "Įkeliamos nuotraukos…" : "Įkeliamas video…");
     try {
       const uploaded = await uploadMediaToRecord(
         detailId,
@@ -1882,10 +2014,10 @@ export default function Home({ initialData = null }: HomeProps) {
         videos: [...defectVideosFor(item), ...saved as DefectVideo[]],
       } : item));
       drafts.forEach((media) => URL.revokeObjectURL(media.url));
-      showToast(kind === "photo" ? `Pridėta nuotraukų: ${saved.length}` : `Pridėta video: ${saved.length}`);
+      showToast(kind === "photo" ? `Pridėta nuotraukų: ${saved.length}` : `Pridėta video: ${saved.length}`, waitId);
     } catch (error) {
       setConnection("demo");
-      showToast(error instanceof Error ? error.message : "Failų įkelti nepavyko");
+      showToast(error instanceof Error ? error.message : "Failų įkelti nepavyko", waitId);
     }
   }
 
@@ -1913,23 +2045,29 @@ export default function Home({ initialData = null }: HomeProps) {
     const form = event.currentTarget;
     const data = new FormData(form);
     const name = String(data.get("name") ?? "").trim();
-    if (!name) return;
-    const optimistic: Project = { id: randomId(), name, address: "", open: 0, overdue: 0, status: "Vykdomas", archived: false };
+    const address = String(data.get("address") ?? "").trim();
+    if (!name || !address) return;
+    const optimistic: Project = { id: randomId(), name, address, open: 0, overdue: 0, status: "Vykdomas", archived: false };
     setProjects((items) => [optimistic, ...items]);
     selectProject(optimistic.id, false);
     setNewProjectOpen(false);
     form.reset();
+    const waitId = notify.loading("Kuriamas objektas…");
     try {
-      const response = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+      const response = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, address }),
+      });
       if (!response.ok) throw new Error("Nepavyko išsaugoti");
       const payload = await response.json() as { project: Project };
       setProjects((items) => items.map((item) => item.id === optimistic.id ? payload.project : item));
       projectIdRef.current = payload.project.id;
       setProjectId(payload.project.id);
       window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, payload.project.id);
-      showToast(`Projektas „${payload.project.name}“ sukurtas ir pasirinktas`);
+      showToast(`Projektas „${payload.project.name}“ sukurtas ir pasirinktas`, waitId);
     } catch {
-      showToast("Projektas sukurtas demonstracinėje sesijoje");
+      showToast("Projektas sukurtas demonstracinėje sesijoje", waitId);
     }
   }
 
@@ -2127,29 +2265,42 @@ export default function Home({ initialData = null }: HomeProps) {
   }
 
   async function printReport() {
-    if (!exportRows.length) return showToast("Nėra ką eksportuoti");
-    if (!reportRows.length) showToast(`Spausdinami visi matomi įrašai (${exportRows.length})`);
-    const nextUrls: Record<string, string[]> = {};
-    const revokeFns: Array<() => void> = [];
-    for (const defect of exportRows) {
-      const photos = defectPhotosFor(defect).map((photo) => photo.url);
-      if (reportOptions.photos && photos.length) {
-        const prepared = await preparePrintImages(photos);
-        nextUrls[defect.id] = prepared.urls;
-        revokeFns.push(prepared.revoke);
-      }
+    if (pdfPrinting) return;
+    if (!exportRows.length) {
+      notify.error("Nėra ką eksportuoti");
+      return;
     }
-    setPrintImageUrls(nextUrls);
-    const previousTitle = document.title;
-    document.title = `${activeProject.name} – darbų ataskaita`;
-    window.setTimeout(() => {
+    setPdfPrinting(true);
+    const revokeFns: Array<() => void> = [];
+    let toastId: string | number | undefined;
+    try {
+      toastId = notify.loading("Ruošiama PDF ataskaita…");
+      const jobs = exportRows.map(async (defect) => {
+        const photos = defectPhotosFor(defect).map((photo) => photo.thumbUrl || photo.viewUrl || photo.url);
+        if (!reportOptions.photos || !photos.length) return [defect.id, [] as string[]] as const;
+        const prepared = await preparePrintImages(photos);
+        revokeFns.push(prepared.revoke);
+        return [defect.id, prepared.urls] as const;
+      });
+      const nextUrls = Object.fromEntries(await Promise.all(jobs));
+      flushSync(() => setPrintImageUrls(nextUrls));
+      await waitForPrintReportImages();
+      const previousTitle = document.title;
+      document.title = `${activeProject.name} – darbų ataskaita`;
       window.print();
+      notify.success("Ataskaita paruošta", { id: toastId });
       window.setTimeout(() => {
         document.title = previousTitle;
         revokeFns.forEach((fn) => fn());
         setPrintImageUrls({});
       }, 1200);
-    }, 120);
+    } catch (error) {
+      revokeFns.forEach((fn) => fn());
+      setPrintImageUrls({});
+      notify.error(error instanceof Error ? error.message : "PDF sugeneruoti nepavyko", { id: toastId });
+    } finally {
+      setPdfPrinting(false);
+    }
   }
 
   async function openInviteModal() {
@@ -2324,10 +2475,13 @@ export default function Home({ initialData = null }: HomeProps) {
                   <button type="button" className="plan-heading-button" onClick={openPlanViewer}>Planas</button>
                 ) : null}
               </div>
-              <p>
-                {projectCompleted ? "Archyvuotas objektas · " : ""}
-                {activeProject.address || (isClient ? "Čia fiksuojate brokus, apimtis ir papildomas apimtis." : "Projekto informaciją galėsite papildyti vėliau")}
-              </p>
+              <AddressNavigationPicker
+                address={activeProject.address}
+                className="project-address-line"
+                prefix={projectCompleted ? "Archyvuotas objektas · " : undefined}
+                placeholder={isClient ? "Čia fiksuojate brokus, apimtis ir papildomas apimtis." : "Projekto informaciją galėsite papildyti vėliau"}
+                onCopied={() => showToast("Adresas nukopijuotas")}
+              />
               <button
                 type="button"
                 className="mobile-refresh-bar"
@@ -2382,15 +2536,24 @@ export default function Home({ initialData = null }: HomeProps) {
 
           {!isClient && (
           <section className="metrics metrics-with-spend" aria-label="Objekto suvestinė">
-            <article><div><span>Atviri įrašai</span><b className="metric-icon red">!</b></div><strong>{openCount}</strong><p>Brokai, apimtys ir užduotys</p></article>
-            <article><div><span>Pradelsti</span><b className="metric-icon amber">↗</b></div><strong>{overdueCount}</strong><p>Reikia jūsų dėmesio</p></article>
-            <article><div><span>Vykdomi</span><b className="metric-icon blue">→</b></div><strong>{activeProjectDefects.filter((item) => item.status === "Vykdoma").length}</strong><p>Priskirti atsakingiems</p></article>
-            <article><div><span>Baigti</span><b className="metric-icon green">✓</b></div><strong>{archivedCount}</strong><p>Archyvuoti įrašai</p></article>
+            <button type="button" className={metricCardClass(registerTab === "records" && activeStatus === "Visi")} onClick={() => applyMetricFilter("Visi")} aria-pressed={registerTab === "records" && activeStatus === "Visi"}>
+              <div><span>Atviri įrašai</span><b className="metric-icon red">!</b></div><strong>{openCount}</strong><p>Brokai, apimtys ir užduotys</p>
+            </button>
+            <button type="button" className={metricCardClass(registerTab === "records" && activeStatus === COMPLETED_STATUS)} onClick={() => applyMetricFilter(COMPLETED_STATUS)} aria-pressed={registerTab === "records" && activeStatus === COMPLETED_STATUS}>
+              <div><span>Sutvarkyta</span><b className="metric-icon amber">✓</b></div><strong>{fixedCount}</strong><p>Patvirtinti baigti darbai</p>
+            </button>
+            <button type="button" className={metricCardClass(registerTab === "records" && activeStatus === "Vykdoma")} onClick={() => applyMetricFilter("Vykdoma")} aria-pressed={registerTab === "records" && activeStatus === "Vykdoma"}>
+              <div><span>Vykdomi</span><b className="metric-icon blue">→</b></div><strong>{inProgressCount}</strong><p>Priskirti atsakingiems</p>
+            </button>
+            <button type="button" className={metricCardClass(registerTab === "records" && activeStatus === ARCHIVED_TAB)} onClick={() => applyMetricFilter(ARCHIVED_TAB)} aria-pressed={registerTab === "records" && activeStatus === ARCHIVED_TAB}>
+              <div><span>Baigti</span><b className="metric-icon green">✓</b></div><strong>{archivedCount}</strong><p>Archyvuoti įrašai</p>
+            </button>
             <article className="metric-spend"><div><span>Išleista</span><b className="metric-icon green">€</b></div><strong>{formatMoneyEuro(activeProject.invoiceTotalCents ?? 0)}</strong><p>be PVM {formatMoneyEuro(projectInvoiceExVatCents)}</p></article>
           </section>
           )}
 
           <section
+            ref={registerCardRef}
             className={`register-card${registerTab === "invoices" ? " register-invoices-tab" : ""}${invoiceListDragActive ? " invoice-list-drop-active" : ""}`}
             onDragEnter={(event) => {
               if (!isStaff || registerTab !== "invoices" || projectCompleted || captureOpen) return;
@@ -2594,11 +2757,11 @@ export default function Home({ initialData = null }: HomeProps) {
               const photos = defectPhotosFor(defect);
               const items = defectItemsFor(defect);
               const fieldRows = buildReportFieldRows(defect, reportOptions);
-              const printPhotos = printImageUrls[defect.id] ?? photos.map((photo) => photo.url);
+              const printPhotos = printImageUrls[defect.id];
               return <article key={defect.id}>
                 <div className="print-defect-head"><div><small>{defect.code} · {defect.recordType}</small>{reportOptions.title && <h2>{defect.title}</h2>}</div>{reportOptions.status && <span className={statusClass(defect.status)}><i />{defect.status}</span>}</div>
                 {fieldRows.length > 0 && <div className="print-field-rows">{fieldRows.map((row) => <p key={row.label}><strong>{row.label}:</strong> {row.value}</p>)}</div>}
-                {reportOptions.photos && photos.length > 0 && <div className="print-photo-grid">{photos.map((photo, index) => <figure key={photo.id}><img src={printPhotos[index] ?? photo.url} alt={`${defect.title}, nuotrauka ${index + 1}`} />{photo.caption && <figcaption>{photo.caption}</figcaption>}</figure>)}</div>}
+                {reportOptions.photos && printPhotos?.some(Boolean) ? <div className="print-photo-grid">{printPhotos.map((src, index) => src && <figure key={photos[index]?.id ?? index}><img src={src} alt={`${defect.title}, nuotrauka ${index + 1}`} />{photos[index]?.caption && <figcaption>{photos[index].caption}</figcaption>}</figure>)}</div> : null}
                 {reportOptions.descriptions && <div className="print-issues">{items.map((item, index) => <div key={item.id}><b>{index + 1}</b><p>{reportOptions.descriptions && <><strong>{recordCopy[defect.recordType].issueLabel.replace(" *", "")}:</strong> {item.issue}<br /></>}{reportOptions.requiredWork && <><strong>{recordCopy[defect.recordType].workLabel}:</strong> {item.requiredWork || "Nenurodyta"}</>}</p></div>)}</div>}
                 {reportOptions.linkedTasks && (defect.childTasks ?? []).length > 0 && (
                   <div className="print-linked-tasks">
@@ -2637,22 +2800,47 @@ export default function Home({ initialData = null }: HomeProps) {
           projectId={resolvedProjectId}
           projectName={activeProject.name}
           plans={projectPlans}
-          records={projectDefects.map((item): PlanPinRecord => ({
-            id: item.id,
-            code: item.code,
-            title: item.title,
-            recordType: item.recordType,
-            status: item.status,
-            room: item.room,
-            photoUrl: item.photo ?? item.photos?.[0]?.url,
-            photoThumbUrl: item.photos?.[0]?.thumbUrl,
-            planId: item.planId ?? null,
-            planX: item.planX ?? null,
-            planY: item.planY ?? null,
-          }))}
+          records={projectDefects.map((item): PlanPinRecord => {
+            const notes = defectItemsFor(item)
+              .filter((note) => note.issue.trim() || note.requiredWork.trim())
+              .slice(0, 4)
+              .map((note) => ({
+                issue: note.issue.trim(),
+                work: note.requiredWork.trim() || undefined,
+              }));
+            const media = [
+              ...defectPhotosFor(item).map((photo) => ({
+                id: photo.id,
+                url: photo.url,
+                thumbUrl: photo.thumbUrl,
+                kind: "photo" as const,
+              })),
+              ...defectVideosFor(item).map((video) => ({
+                id: video.id,
+                url: video.url,
+                kind: "video" as const,
+              })),
+            ];
+            return {
+              id: item.id,
+              code: item.code,
+              title: item.title,
+              recordType: item.recordType,
+              status: item.status,
+              room: item.room,
+              zone: item.zone,
+              photoUrl: item.photo ?? item.photos?.[0]?.url,
+              photoThumbUrl: item.photos?.[0]?.thumbUrl,
+              media,
+              notes,
+              planId: item.planId ?? null,
+              planX: item.planX ?? null,
+              planY: item.planY ?? null,
+            };
+          })}
           canUpload={isStaff && !projectCompleted}
-          canCreate={!projectCompleted}
-          canAttach={isStaff && !projectCompleted}
+          canCreate={!projectCompleted && !planAttachRecordId}
+          canAttach={isStaff && !projectCompleted && !planAttachRecordId}
           onClose={closePlanViewer}
           onPlansChange={setProjectPlans}
           onCreateRecord={openCaptureFromPlan}
@@ -2663,11 +2851,18 @@ export default function Home({ initialData = null }: HomeProps) {
           onFinalizeCapture={finalizeCaptureOnMap}
           onCancelFinalizeCapture={cancelFinalizeCapture}
           onAttachRecord={attachRecordToPlan}
+          onUpdateRecordPin={updateRecordPlanPin}
+          canEditPin={isStaff && !projectCompleted}
+          attachRecordId={planAttachRecordId}
+          initialMoveRecordId={planMoveRecordId}
+          onPinMoveComplete={handlePlanPinMoved}
           onOpenRecord={(id) => {
             setDetailId(id);
           }}
           focusRecordId={planFocusRecordId}
           onFocusHandled={() => setPlanFocusRecordId(null)}
+          withDrawer={drawerOverPlan}
+          withDrawerInteraction={drawerPlanInteraction}
           showToast={showToast}
         />
       ) : null}
@@ -2732,7 +2927,7 @@ export default function Home({ initialData = null }: HomeProps) {
             </div>
 
             <section className="photo-capture-block">
-              <div className="capture-section-title"><div><strong>Nuotraukos ir video</strong><span>{captureRecordType === "Brokas" ? "Brokui užtenka nuotraukos arba video." : "Nuotrauka nebūtina."} Iki {MAX_PHOTOS} foto ir {MAX_VIDEOS} video.</span></div><b>{photoDrafts.length}/{MAX_PHOTOS}</b></div>
+              <div className="capture-section-title"><div><strong>Nuotraukos ir video</strong><span>{captureRecordType === "Brokas" ? "Brokui užtenka nuotraukos arba video." : "Nuotrauka nebūtina."} Video — iki {MAX_VIDEOS}.</span></div><b>{photoDrafts.length} foto · {videoDrafts.length}/{MAX_VIDEOS} video</b></div>
               {annotatePromptPhotoId && (
                 <div className="annotate-prompt" role="status">
                   <p>Nuotrauka pridėta. Pažymėti broko vietą?</p>
@@ -2774,14 +2969,14 @@ export default function Home({ initialData = null }: HomeProps) {
                       <input value={video.caption} onChange={(event) => updateVideoCaption(video.id, event.target.value)} placeholder="Kas rodoma? (nebūtina)" />
                     </article>
                   ))}
-                  {photoDrafts.length < MAX_PHOTOS && <>
-                      <MediaFileButton className="photo-add-tile photo-camera-tile" accept="image/*" capture="environment" onFiles={(files) => handlePhotos(files, true)}>
-                        <span className="photo-action-symbol">◎</span><strong>Fotografuoti</strong><small>Atidaryti kamerą</small>
-                      </MediaFileButton>
-                      <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" multiple onFiles={handlePhotos}>
-                        <span className="photo-action-symbol">⇧</span><strong>Įkelti</strong><small>Galerija</small>
-                      </MediaFileButton>
-                    </>}
+                  <>
+                    <MediaFileButton className="photo-add-tile photo-camera-tile" accept="image/*" capture="environment" onFiles={(files) => handlePhotos(files, true)}>
+                      <span className="photo-action-symbol">◎</span><strong>Fotografuoti</strong><small>Atidaryti kamerą</small>
+                    </MediaFileButton>
+                    <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" multiple onFiles={handlePhotos}>
+                      <span className="photo-action-symbol">⇧</span><strong>Įkelti</strong><small>Galerija</small>
+                    </MediaFileButton>
+                  </>
                   {videoDrafts.length < MAX_VIDEOS && <>
                     <MediaFileButton className="photo-add-tile video-camera-tile" accept="video/*" capture="environment" onFiles={handleVideos}>
                       <span className="photo-action-symbol">●</span><strong>Filmuoti</strong><small>Kamera</small>
@@ -2907,8 +3102,9 @@ export default function Home({ initialData = null }: HomeProps) {
           <button className="modal-scrim" onClick={() => setNewProjectOpen(false)} aria-label="Uždaryti" />
           <form className="project-modal" onSubmit={addProject}>
             <div className="panel-title"><div><span>Naujas projektas</span><h2 id="project-title">Sukurti projektą</h2></div><button type="button" onClick={() => setNewProjectOpen(false)} aria-label="Uždaryti">×</button></div>
-            <p>Dabar pakanka projekto pavadinimo. Adresą, kontaktinį asmenį ir kitą informaciją galėsite papildyti vėliau projekto viduje.</p>
-            <label><span>Projekto pavadinimas *</span><input name="name" required placeholder="Pvz., Vytenio g. 15" autoFocus /></label>
+            <p>Įveskite projekto pavadinimą ir objekto adresą. Adresą galėsite vėliau atidaryti Waze, Google Maps ar Apple Maps.</p>
+            <label><span>Projekto pavadinimas *</span><input name="name" required placeholder="Pvz., CC4" autoFocus /></label>
+            <label><span>Objekto adresas *</span><input name="address" required placeholder="Pvz., Kauno g. 15, Vilnius" /></label>
             <div className="panel-actions"><button type="button" className="secondary-button" onClick={() => setNewProjectOpen(false)}>Atšaukti</button><button type="submit" className="primary-button">Sukurti ir pasirinkti</button></div>
           </form>
         </div>
@@ -2995,7 +3191,7 @@ export default function Home({ initialData = null }: HomeProps) {
       )}
 
       {detail && (
-        <div className={`detail-drawer ${detailId ? "drawer-open" : ""}${planViewerOpen ? " detail-drawer-over-plan" : ""}`}>
+        <div className={`detail-drawer ${detailId ? "drawer-open" : ""}${drawerOverPlan ? " detail-drawer-over-plan" : ""}${drawerPlanInteraction ? " detail-drawer-plan-interaction" : ""}`}>
           <div className="drawer-header"><div><span>{detail.code} <em className={recordTypeClass(detail.recordType)}>{detail.recordType}</em>{isStaff && originBadge(detail)}</span><small>{placeLabel(detail)}{isStaff && isClientOrigin(detail) && detail.createdByEmail ? ` · įkėlė ${detail.createdByEmail}` : isStaff ? " · Distyle" : ""}</small></div><button onClick={() => setDetailId(null)} aria-label="Uždaryti">×</button></div>
           <div
             className={`drawer-gallery ${detailPhotoDragActive ? "drawer-gallery-drag-active" : ""}`}
@@ -3006,12 +3202,51 @@ export default function Home({ initialData = null }: HomeProps) {
             }}
             onDrop={handleMorePhotoDrop}
           >
-            {detailHasPlanPin ? (
-              <div className="drawer-plan-link">
-                <button type="button" className="add-issue-button add-issue-button-emphasis" onClick={() => openRecordOnPlan(detail)}>
-                  ⌖ Peržiūrėti žemėlapyje
-                </button>
-              </div>
+            {projectPlans.length > 0 ? (
+              <section className="drawer-plan-card" aria-label="Vieta plane">
+                <div className="drawer-plan-card-head">
+                  <span className="drawer-plan-card-icon" aria-hidden>⌖</span>
+                  <div>
+                    <strong>Vieta plane</strong>
+                    <small>
+                      {detailHasPlanPin
+                        ? detailPlan?.title
+                          ? `Pažymėta · ${detailPlan.title}`
+                          : "Pažymėta ant plano"
+                        : "Dar nepažymėta — galite pridėti smeigtuką"}
+                    </small>
+                  </div>
+                </div>
+                <div className={`drawer-plan-card-actions${detailHasPlanPin ? " drawer-plan-card-actions-split" : ""}`}>
+                  {detailHasPlanPin ? (
+                    <>
+                      <button type="button" className="drawer-plan-btn drawer-plan-btn-view" onClick={() => openRecordOnPlan(detail)}>
+                        <span className="drawer-plan-btn-icon" aria-hidden>◎</span>
+                        <span>Peržiūrėti</span>
+                      </button>
+                      {canManagePlanPin ? (
+                        <>
+                          <button type="button" className="drawer-plan-btn drawer-plan-btn-move" onClick={() => openDetailMoveOnPlan(detail)}>
+                            <span className="drawer-plan-btn-icon" aria-hidden>↔</span>
+                            <span>Perkelti</span>
+                          </button>
+                          <button type="button" className="drawer-plan-btn drawer-plan-btn-remove" onClick={() => void detachDetailPlanPin(detail)}>
+                            <span className="drawer-plan-btn-icon" aria-hidden>×</span>
+                            <span>Nuimti</span>
+                          </button>
+                        </>
+                      ) : null}
+                    </>
+                  ) : canManagePlanPin ? (
+                    <button type="button" className="drawer-plan-btn drawer-plan-btn-mark" onClick={() => openDetailMarkOnPlan(detail)}>
+                      <span className="drawer-plan-btn-icon" aria-hidden>⌖</span>
+                      <span>Žymėti plane</span>
+                    </button>
+                  ) : (
+                    <p className="drawer-plan-card-note">Smeigtuką gali pridėti Distyle komanda.</p>
+                  )}
+                </div>
+              </section>
             ) : null}
             {detailMedia.length ? (
               <div className="drawer-thumbs">
@@ -3020,11 +3255,30 @@ export default function Home({ initialData = null }: HomeProps) {
                     <button type="button" className="drawer-thumb" onClick={() => setMediaViewerIndex(index)}>
                       {item.kind === "video" ? (
                         <>
-                          <video src={item.url} muted playsInline preload="metadata" />
+                          {item.thumbUrl ? (
+                            <MediaImage
+                              recordId={detail?.id || ""}
+                              mediaId={item.id}
+                              thumbUrl={item.thumbUrl}
+                              preferThumb
+                              loading="eager"
+                              className="thumb-photo"
+                            />
+                          ) : (
+                            <span className="thumb-photo thumb-video-placeholder" />
+                          )}
                           <span className="thumb-play">▶</span>
                         </>
                       ) : (
-                        <span className="thumb-photo" style={item.thumbUrl ? { backgroundImage: `url(${item.thumbUrl})` } : undefined} />
+                        <MediaImage
+                          recordId={detail?.id || ""}
+                          mediaId={item.id}
+                          thumbUrl={item.thumbUrl}
+                          viewUrl={item.url}
+                          preferThumb
+                          loading="eager"
+                          className="thumb-photo"
+                        />
                       )}
                     </button>
                     {can(profile, "delete_media") && !item.id.startsWith("legacy-") ? (
@@ -3055,6 +3309,12 @@ export default function Home({ initialData = null }: HomeProps) {
                   Užbaigimą prašė <b>{detail.completionRequestedName || "Nežinomas vartotojas"}</b>
                   {detail.completionRequestedAt ? ` · ${new Intl.DateTimeFormat("lt-LT", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(detail.completionRequestedAt))}` : ""}
                 </p>
+                {detail.resolution?.trim() ? (
+                  <div className="completion-pending-comment">
+                    <strong>Užbaigimo komentaras</strong>
+                    <p>{detail.resolution.trim()}</p>
+                  </div>
+                ) : null}
                 {detailRepairPhoto ? (
                   <button type="button" className="completion-repair-photo" onClick={() => {
                     const index = detailMedia.findIndex((item) => item.id === detailRepairPhoto.id);
@@ -3063,9 +3323,9 @@ export default function Home({ initialData = null }: HomeProps) {
                     <img src={detailRepairPhoto.thumbUrl || detailRepairPhoto.url} alt="Po remonto nuotrauka" />
                     <span>Peržiūrėti po remonto nuotrauką</span>
                   </button>
-                ) : (
-                  <p className="completion-pending-missing-photo">Po remonto nuotrauka nerasta — paprašykite darbuotojo pridėti.</p>
-                )}
+                ) : !detail.resolution?.trim() ? (
+                  <p className="completion-pending-missing-photo">Nėra komentaro ar po remonto nuotraukos — paprašykite darbuotojo papildyti.</p>
+                ) : null}
                 {canApproveCompletionRequest && (
                   <div className="completion-pending-actions">
                     <button type="button" className="secondary-button" disabled={completionActionSaving} onClick={() => void rejectCompletion()}>Grąžinti į vykdymą</button>
@@ -3238,7 +3498,7 @@ export default function Home({ initialData = null }: HomeProps) {
           </div>
         </div>
       )}
-      {detailId && <button className={`drawer-scrim${planViewerOpen ? " drawer-scrim-over-plan" : ""}`} onClick={() => setDetailId(null)} aria-label="Uždaryti detalę" />}
+      {detailId && <button className={`drawer-scrim${drawerOverPlan ? " drawer-scrim-over-plan" : ""}`} onClick={() => setDetailId(null)} aria-label="Uždaryti detalę" />}
 
       {reportMode && isStaff && (
         <div className="report-modal-layer" role="dialog" aria-modal="true" aria-labelledby="report-title">
@@ -3278,7 +3538,26 @@ export default function Home({ initialData = null }: HomeProps) {
                     return <article key={item.id}>
                       <div className="report-preview-title"><div><small>{item.code} · {item.recordType}</small>{reportOptions.title && <h4>{item.title}</h4>}</div>{reportOptions.status && <span className={statusClass(item.status)}><i />{item.status}</span>}</div>
                       {fieldRows.length > 0 && <div className="report-preview-fields">{fieldRows.map((row) => <p key={row.label}><strong>{row.label}:</strong> {row.value}</p>)}</div>}
-                      {reportOptions.photos && photos.length > 0 && <div className="report-preview-photos">{photos.slice(0, 4).map((photo) => photo.thumbUrl ? <img key={photo.id} src={photo.thumbUrl} alt="" loading="lazy" decoding="async" /> : <span key={photo.id} className="report-preview-photo-placeholder">Foto</span>)}{photos.length > 4 && <span>+{photos.length - 4}</span>}</div>}
+                      {reportOptions.photos && photos.length > 0 && (
+                        <div className="report-preview-photos">
+                          {photos.slice(0, 4).map((photo) => (
+                            <img
+                              key={photo.id}
+                              src={photo.thumbUrl || photo.viewUrl || photo.url}
+                              alt=""
+                              loading="lazy"
+                              decoding="async"
+                              onError={(event) => {
+                                const fallback = photo.viewUrl || photo.url;
+                                if (fallback && event.currentTarget.src !== fallback) {
+                                  event.currentTarget.src = fallback;
+                                }
+                              }}
+                            />
+                          ))}
+                          {photos.length > 4 && <span>+{photos.length - 4}</span>}
+                        </div>
+                      )}
                       {reportOptions.descriptions && <div className="report-preview-issues">{issues.map((issue, index) => <p key={issue.id}><b>{index + 1}.</b> {issue.issue}{reportOptions.requiredWork && issue.requiredWork && <small>Ką atlikti: {issue.requiredWork}</small>}</p>)}</div>}
                       {reportOptions.linkedTasks && (item.childTasks ?? []).length > 0 && (
                         <div className="report-preview-linked-tasks">
@@ -3296,7 +3575,7 @@ export default function Home({ initialData = null }: HomeProps) {
             <footer className="report-builder-actions">
               <button type="button" className="secondary-button report-close-button" onClick={() => setReportMode(false)}>Uždaryti</button>
               <button type="button" className="secondary-button report-export-button" onClick={downloadCsv}>CSV</button>
-              <button type="button" className="primary-button report-export-button" onClick={printReport}>PDF</button>
+              <button type="button" className="primary-button report-export-button" onClick={() => void printReport()} disabled={pdfPrinting}>{pdfPrinting ? "Ruošiama…" : "PDF"}</button>
             </footer>
           </section>
         </div>
@@ -3308,6 +3587,7 @@ export default function Home({ initialData = null }: HomeProps) {
         <MediaViewer
           items={detailMedia}
           index={mediaViewerIndex}
+          recordId={detail.id}
           onClose={() => setMediaViewerIndex(null)}
           onIndexChange={setMediaViewerIndex}
           onAnnotate={
@@ -3342,40 +3622,85 @@ export default function Home({ initialData = null }: HomeProps) {
 
       {completeOpen && detail && (
         <div className="modal-layer complete-modal-layer" role="dialog" aria-modal="true" aria-labelledby="complete-title">
-          <button className="modal-scrim" onClick={() => !completeSaving && setCompleteOpen(false)} aria-label="Uždaryti" />
+          <button className="modal-scrim" onClick={closeCompleteModal} aria-label="Uždaryti" />
           <section className="capture-panel complete-panel">
             <div className="panel-handle" />
-            <div className="panel-title"><div><span>{detail.code}</span><h2 id="complete-title">Prašyti užbaigti</h2></div><button type="button" onClick={() => setCompleteOpen(false)} disabled={completeSaving} aria-label="Uždaryti">×</button></div>
-            <div className="complete-status-preview"><span className={statusClass(PENDING_APPROVAL_STATUS)}><i />{PENDING_APPROVAL_STATUS}</span><p>Būsena po siuntimo patvirtinimui</p></div>
-            <p className="complete-copy">
-              Pridėkite <strong>po remonto nuotrauką</strong>.
-              {completionApproverLabel
-                ? ` Patvirtins: ${completionApproverLabel}.`
-                : " Projekto nustatymuose pažymėtas asmuo peržiūrės nuotrauką ir patvirtins archyvavimą."}
-            </p>
-            <div className="complete-photo-block">
-              <strong>Po remonto nuotrauka (privaloma)</strong>
-              <span>Parodykite, kaip atrodo sutvarkytas brokas.</span>
-              {completePhotoPreview ? (
-                <div className="complete-photo-preview">
-                  <img src={completePhotoPreview} alt="Po remonto peržiūra" />
-                  <button type="button" className="secondary-button" onClick={clearCompletePhoto} disabled={completeSaving}>Pašalinti</button>
+            <header className="complete-header">
+              <div className="panel-title">
+                <div><span>{detail.code}</span><h2 id="complete-title">Prašyti užbaigti</h2></div>
+                <button type="button" onClick={closeCompleteModal} disabled={completeSaving} aria-label="Uždaryti">×</button>
+              </div>
+              <div className="complete-status-preview">
+                <span className={statusClass(PENDING_APPROVAL_STATUS)}><i />{PENDING_APPROVAL_STATUS}</span>
+                <p>Po siuntimo laukia patvirtinimo</p>
+              </div>
+            </header>
+            <div className="complete-body">
+              <p className="complete-lead">
+                Užpildykite <strong>komentarą</strong> arba pridėkite <strong>nuotrauką</strong>. Bent vienas variantas privalomas.
+              </p>
+              <section className="complete-step-card" aria-labelledby="complete-comment-label">
+                <div className="complete-step-head">
+                  <span className="complete-step-badge">1</span>
+                  <div className="complete-step-copy">
+                    <h3 id="complete-comment-label">Ką atlikote?</h3>
+                    <p>Trumpai aprašykite atliktus darbus</p>
+                  </div>
+                  {completeComment.trim() ? <span className="complete-step-check" aria-hidden="true">✓</span> : null}
                 </div>
-              ) : (
-                <div className="complete-photo-actions">
+                <textarea
+                  id="complete-comment"
+                  className="complete-textarea"
+                  rows={5}
+                  value={completeComment}
+                  onChange={(event) => setCompleteComment(event.target.value)}
+                  placeholder="Pvz., pakeistas fasadas, sureguliuotos durys, išlygintas stalviršis…"
+                  disabled={completeSaving}
+                  maxLength={4000}
+                />
+              </section>
+              <div className="complete-between" aria-hidden="true"><span>arba</span></div>
+              <section className="complete-step-card" aria-labelledby="complete-photo-label">
+                <div className="complete-step-head">
+                  <span className="complete-step-badge">2</span>
+                  <div className="complete-step-copy">
+                    <h3 id="complete-photo-label">Po remonto nuotrauka</h3>
+                    <p>Parodykite, kaip atrodo sutvarkytas brokas</p>
+                  </div>
+                  {completePhotoDrafts.length ? <span className="complete-step-count">{completePhotoDrafts.length}</span> : null}
+                </div>
+                <div className="photo-draft-grid complete-photo-grid">
+                  {completePhotoDrafts.map((photo, index) => (
+                    <article key={photo.id} className="photo-draft-card">
+                      <div style={{ backgroundImage: `url(${photo.url})` }}>
+                        <span>{index + 1}</span>
+                        <button type="button" className="photo-draft-remove" onClick={() => removeCompletePhotoDraft(photo.id)} disabled={completeSaving} aria-label={`Pašalinti ${index + 1} nuotrauką`}>×</button>
+                      </div>
+                    </article>
+                  ))}
                   <MediaFileButton className="photo-add-tile photo-camera-tile" accept="image/*" capture="environment" onFiles={handleCompletePhoto} disabled={completeSaving}>
                     <span className="photo-action-symbol">◎</span><strong>Fotografuoti</strong>
                   </MediaFileButton>
-                  <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" onFiles={handleCompletePhoto} disabled={completeSaving}>
+                  <MediaFileButton className="photo-add-tile photo-upload-tile" accept="image/*" multiple onFiles={handleCompletePhoto} disabled={completeSaving}>
                     <span className="photo-action-symbol">⇧</span><strong>Įkelti</strong>
                   </MediaFileButton>
                 </div>
-              )}
+              </section>
+              {completionApproverLabel ? (
+                <p className="complete-approver-note">Patvirtins: <strong>{completionApproverLabel}</strong></p>
+              ) : null}
             </div>
-            <div className="panel-actions">
-              <button type="button" className="secondary-button" onClick={() => setCompleteOpen(false)} disabled={completeSaving}>Atšaukti</button>
-              <button type="button" className="primary-button complete-action-button" onClick={() => void confirmComplete()} disabled={completeSaving || !completePhoto}>{completeSaving ? "Siunčiama…" : "Siųsti patvirtinimui"}</button>
-            </div>
+            <footer className="complete-footer panel-actions">
+              <button type="button" className="secondary-button" onClick={closeCompleteModal} disabled={completeSaving}>Atšaukti</button>
+              <button
+                type="button"
+                className="primary-button complete-action-button"
+                onClick={() => void confirmComplete()}
+                disabled={completeSaving || (!completeComment.trim() && !completePhotoDrafts.length)}
+              >
+                {completeSaving ? "Siunčiama…" : "Siųsti patvirtinimui"}
+              </button>
+            </footer>
           </section>
         </div>
       )}
@@ -3387,8 +3712,6 @@ export default function Home({ initialData = null }: HomeProps) {
           onClose={() => setInvoiceReportOpen(false)}
         />
       ) : null}
-
-      {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
     </div>
   );
 }

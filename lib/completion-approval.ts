@@ -57,16 +57,11 @@ export async function recordHasRepairPhoto(supabase: SupabaseClient, recordId: s
     .ilike("caption", "%po remonto%");
 
   if (error) throw error;
-  if ((count ?? 0) > 0) return true;
+  return (count ?? 0) > 0;
+}
 
-  const { count: anyPhotoCount, error: anyPhotoError } = await supabase
-    .from("record_media")
-    .select("id", { count: "exact", head: true })
-    .eq("record_id", recordId)
-    .eq("media_kind", "photo");
-
-  if (anyPhotoError) throw anyPhotoError;
-  return (anyPhotoCount ?? 0) > 0;
+export function hasCompletionEvidence(completionComment: string, hasRepairPhoto: boolean) {
+  return Boolean(completionComment.trim()) || hasRepairPhoto;
 }
 
 export async function listCompletionApprovers(

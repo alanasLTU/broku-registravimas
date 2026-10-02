@@ -1,5 +1,6 @@
-export const MAX_PHOTOS = 6;
 export const MAX_VIDEOS = 1;
+/** Maks. failų viename įkėlimo užklausoje (nuotraukų limito nėra). */
+export const MAX_MEDIA_BATCH = 30;
 export const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 export const MAX_VIDEO_BYTES = 40 * 1024 * 1024;
 export const MEDIA_BUCKET = "record-media";
